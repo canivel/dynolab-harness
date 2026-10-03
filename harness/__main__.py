@@ -345,16 +345,27 @@ def cmd_task_dryrun(cfg, args) -> int:
 def cmd_env(cfg, args) -> int:
     """Environment templates and instances: list, validate, build, up, down, status, events."""
     from . import environments as env
+    from .config import is_builtin
     out = None
     if args.action == "list":
         out = {"templates": [], "instances": env.list_instances()}
         for tid in env.list_templates():
             t = env.load_template(tid)
             out["templates"].append({"id": t.id, "meta": t.meta, "segments": t.segments,
+                                     "builtin": is_builtin(t.dir), "path": str(t.dir), "agent": t.agent,
                                      "nodes": [{"name": n["name"], "segment": n["segment"], "image": n.get("image")} for n in t.nodes],
                                      "gateway": t.gateway, "errors": env.validate(t)})
+        out["presets"] = env.PRESETS
     elif args.action == "validate":
         errors = env.validate(env.load_template(args.target))
+        out = {"ok": not errors, "errors": errors}
+    elif args.action == "check":
+        # Validate an environment folder before it is saved (the folder name must equal its id).
+        folder = Path(args.target).resolve()
+        try:
+            errors = env.validate(env.load_template(folder.name, folder.parent))
+        except Exception as e:  # noqa: BLE001 - reported to the caller
+            errors = [f"environment.yaml: {e}"]
         out = {"ok": not errors, "errors": errors}
     elif args.action == "build":
         t = env.load_template(args.target)
@@ -578,7 +589,7 @@ def main(argv=None) -> int:
     sub.add_parser("setup", help="prepare the sandbox runtime, image and network").add_argument(
         "--install-runtime", action="store_true", help="macOS: install Colima, Docker and gVisor with Homebrew")
     p = sub.add_parser("env", help="environment templates and instances")
-    p.add_argument("action", choices=["list", "validate", "build", "up", "down", "status", "events"])
+    p.add_argument("action", choices=["list", "validate", "check", "build", "up", "down", "status", "events"])
     p.add_argument("target", nargs="?", help="template id (validate/build/up) or instance name (down/events)")
     p.add_argument("--name", help="instance name for up (default: the template id)")
     p = sub.add_parser("devbox", help="long-lived environments to explore by hand")

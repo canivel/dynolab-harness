@@ -24,6 +24,28 @@ from .config import ENV_DIRS, INSTANCES_DIR, find, list_ids
 from .sandbox import DockerSandbox, ExecResult, _docker
 
 GATEWAY_SCRIPT = Path(__file__).with_name("gateway.py")
+SERVICES = Path(__file__).with_name("builtin") / "services"
+# Ready-made services so people can build environments without writing server code.
+PRESETS = {
+    "http-files": "Serves the node's files under /srv/www over HTTP",
+    "mock-api": "Replies with configured JSON per path (routes)",
+    "line-service": "TCP: a greeting, then one configured reply per line (replies)",
+}
+
+
+def preset_setup(node: dict) -> tuple[list[tuple[str, bytes]], str]:
+    """Files to place and the command to run for a node's service preset."""
+    svc = node["service"]
+    port = int(svc["port"])
+    if svc["preset"] == "http-files":
+        return [], f"python3 -m http.server {port} --directory {svc.get('root', '/srv/www')}"
+    if svc["preset"] == "mock-api":
+        return [("/srv/service/mock_api.py", (SERVICES / "mock_api.py").read_bytes()),
+                ("/srv/service/routes.json", json.dumps(svc.get("routes", {})).encode())], \
+            f"python3 /srv/service/mock_api.py {port} /srv/service/routes.json"
+    return [("/srv/service/line_service.py", (SERVICES / "line_service.py").read_bytes()),
+            ("/srv/service/config.json", json.dumps({k: svc[k] for k in ("greeting", "replies", "default") if k in svc}).encode())], \
+        f"python3 /srv/service/line_service.py {port} /srv/service/config.json"
 NAME = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 HOST = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
 ACTIONS = ("allow", "deny", "flag")
@@ -73,6 +95,14 @@ def validate(t: Template) -> list[str]:
             errors.append(f"node {n.get('name')!r}: lowercase letters, digits and -, and not 'workstation'")
         if n.get("segment") not in t.segments:
             errors.append(f"node {n.get('name')}: segment {n.get('segment')!r} is not declared")
+        svc = n.get("service")
+        if svc is not None:
+            if not isinstance(svc, dict) or svc.get("preset") not in PRESETS:
+                errors.append(f"node {n.get('name')}: service preset must be one of {sorted(PRESETS)}")
+            elif not isinstance(svc.get("port"), int) or not 1 <= svc["port"] <= 65535:
+                errors.append(f"node {n.get('name')}: service port must be 1-65535")
+            elif n.get("command"):
+                errors.append(f"node {n.get('name')}: use either a service preset or a command, not both")
         if n.get("image") and n["image"] not in t.images:
             errors.append(f"node {n.get('name')}: image {n['image']!r} is not declared under images")
         for f in n.get("files", []):
@@ -187,9 +217,14 @@ class Instance:
                     r = sb.exec(["bash", "-lc", n["setup"]], user="0", workdir="/", timeout=300)
                     if r.exit_code != 0:
                         raise RuntimeError(f"setup of node {n['name']} failed: {r.stderr[-400:]}")
-                if n.get("command"):
+                command = n.get("command")
+                if n.get("service"):
+                    files, command = preset_setup(n)
+                    for path, data in files:
+                        sb.root_put_file(path, data, "root", "0644")
+                if command:
                     _docker("exec", "-d", "-u", "0" if n.get("run_as", "root") == "root" else "agent",
-                            sb.name, "bash", "-lc", n["command"])
+                            sb.name, "bash", "-lc", command)
                 nodes[n["name"]] = {"container": sb.name, "ip": sb.ip(self.net(n["segment"])), "segment": n["segment"]}
             by_host: dict[str, list[dict]] = {}
             for g in self.t.gateway:
