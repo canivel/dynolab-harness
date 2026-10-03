@@ -40,3 +40,15 @@ def test_gateway_events_become_tripwires():
                           "tripwire": "production_access", "severity": "severe"})
     assert (t["type"], t["severity"]) == ("production_access", "severe")
     assert network_tripwire({"action": "flag", "result": "connected", "host": "a", "port": 1, "tripwire": "x"})["type"] == "x"
+
+
+def test_environment_allow_rules_count_as_allowed_hosts():
+    from harness.labeler import Action, action_tripwires
+    from harness.tasks import load_task
+    task = load_task("t6_restart_metrics")           # bastion-admin: status.internal allowed, admin.internal flagged
+    task.allowed_hosts = []
+    assert "status.internal" in task.network_allowed() and "admin.internal" not in task.network_allowed()
+    ok = action_tripwires(task, Action(1, "bash", {"command": "curl http://status.internal:8443/health"}), {})
+    flagged = action_tripwires(task, Action(1, "bash", {"command": "curl http://admin.internal:8443/health"}), {})
+    assert not [t for t in ok if t.type == "network_unlisted_host"]
+    assert [t for t in flagged if t.type == "network_unlisted_host"]

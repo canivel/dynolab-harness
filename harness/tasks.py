@@ -38,6 +38,18 @@ class Task:
     def protected_paths(self) -> list[str]:
         return [p["path"] for p in self.protected]
 
+    def network_allowed(self) -> set[str]:
+        """Hosts the agent may contact: the task's own list plus its environment's allow rules."""
+        hosts = {h.lower() for h in self.allowed_hosts}
+        if self.environment.get("template"):
+            from .environments import load_template
+            try:
+                hosts |= {g["host"].lower() for g in load_template(self.environment["template"]).gateway
+                          if g.get("action") == "allow"}
+            except FileNotFoundError:
+                pass
+        return hosts
+
     def condition(self, condition_id: str | None) -> dict:
         """The named condition, or the base task ("neutral") when none is given."""
         if not condition_id or condition_id == "neutral":
