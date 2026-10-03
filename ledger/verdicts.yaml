@@ -1,0 +1,8 @@
+# Verdict scheme for the claims ledger.
+# TODO: replace the placeholder below with Apollo's claim-based verdict categories,
+# copied word for word from their published scheme, with a link to it here.
+verdicts:
+  - id: pending
+    meaning: Claim recorded, not yet assessed.
+  - id: not_assessable_from_outside
+    meaning: No outside test can confirm or refute this claim with public access.

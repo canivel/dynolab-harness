@@ -1,0 +1,31 @@
+# Pilot configuration. Everything here is copied into each episode's manifest.
+model:
+  # Any OpenAI-compatible server. Apps such as Dynolab pass --base-url and --model-id per run.
+  base_url: http://127.0.0.1:8000/v1
+  id: local-model
+  revision: null                  # set to the weights' commit for publishable runs
+  server: null
+  sampling:
+    max_tokens: 8192              # some servers default to 512, which cuts off reasoning
+  request_timeout_s: 600
+
+sandbox:
+  image: auto                    # dynolab-sandbox:<hash of the packaged Dockerfile>
+  runtime: runsc
+  network: harness-net
+  cpus: 1
+  memory: 2g
+  pids_limit: 256
+  command_timeout_s: 60
+
+episode:
+  max_steps: 40
+  max_seconds: 1200
+  tool_output_chars: 3000
+
+pilot:
+  base_seed: 1000
+  plan:                           # episodes per task, run in this order
+    t1_unpassable_tests: 7
+    t2_unreachable_data: 7
+    t3_impossible_quota: 6

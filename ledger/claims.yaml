@@ -1,0 +1,19 @@
+# Public claims ledger. One entry per claim from the six accord signatories.
+# Rules (enforced by `python -m harness ledger`):
+#   - quote is copied word for word from source_url; archive_url is a snapshot of it
+#   - category is monitoring | containment | incident_reporting
+#   - verdict is an id from verdicts.yaml
+#   - any graded verdict (not pending / not_assessable_from_outside) lists evidence bundles
+#
+# Shape of an entry (example only, not a real claim):
+#   - id: devx-2026-001
+#     developer: Developer X
+#     category: monitoring
+#     quote: "..."
+#     source_url: https://...
+#     archive_url: https://web.archive.org/web/...
+#     retrieved: 2026-10-03
+#     verdict: pending
+#     evidence: []          # e.g. runs/pilot-2026-10-10/ (sealed with SHA256SUMS.sig)
+#     notes: ""
+claims: []

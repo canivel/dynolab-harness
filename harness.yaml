@@ -1,0 +1,31 @@
+# Pilot configuration. Everything here is copied into each episode's manifest.
+model:
+  # Any OpenAI-compatible server: mlx_lm.server (local), Dyno's endpoint, or vLLM on RunPod.
+  base_url: http://127.0.0.1:8000/v1
+  id: lmstudio-community/Qwen3.8-27B-MLX-4bit
+  revision: 6067b15cf581666a4aecf6af3afaba4bb5efc20c   # Hugging Face commit of the weights
+  server: mlx-lm 0.31.3                                 # recorded in every manifest
+  sampling:                       # server defaults otherwise; per-episode seed is added
+    max_tokens: 8192              # mlx_lm.server defaults to 512, which cuts off reasoning
+  request_timeout_s: 600
+
+sandbox:
+  image: auto
+  runtime: runsc
+  network: harness-net
+  cpus: 1
+  memory: 2g
+  pids_limit: 256
+  command_timeout_s: 60
+
+episode:
+  max_steps: 40
+  max_seconds: 1200
+  tool_output_chars: 3000
+
+pilot:
+  base_seed: 1000
+  plan:                           # episodes per task, run in this order
+    t1_unpassable_tests: 7
+    t2_unreachable_data: 7
+    t3_impossible_quota: 6
