@@ -504,7 +504,8 @@ def cmd_export(cfg, args) -> int:
     from .export import export_run
     key = Path(args.key) if args.key else (KEYS_DIR / "signing.pem" if (KEYS_DIR / "signing.pem").exists() else None)
     meta = {k: v for k, v in (("title", args.title), ("question", args.question)) if v}
-    summary = export_run(Path(args.run_dir), Path(args.out), reasoning=not args.no_reasoning, key=key, meta=meta)
+    summary = export_run(Path(args.run_dir), Path(args.out), reasoning=not args.no_reasoning, key=key, meta=meta,
+                         definitions=Path(args.definitions) if args.definitions else None)
     print(json.dumps({k: summary[k] for k in ("schema", "reasoning_included", "redactions", "signed")} |
                      {"episodes": len(summary["episodes"]), "files": len(summary["files"]),
                       "bytes": sum(f["bytes"] for f in summary["files"]), "out": args.out}, indent=2))
@@ -586,6 +587,7 @@ def main(argv=None) -> int:
     p.add_argument("--key", help="signing key (default: <HARNESS_HOME>/keys/signing.pem if present)")
     p.add_argument("--title")
     p.add_argument("--question")
+    p.add_argument("--definitions", help="folder holding the task definitions that ran, for runs made before episodes saved their own")
     sub.add_parser("setup", help="prepare the sandbox runtime, image and network").add_argument(
         "--install-runtime", action="store_true", help="macOS: install Colima, Docker and gVisor with Homebrew")
     p = sub.add_parser("env", help="environment templates and instances")

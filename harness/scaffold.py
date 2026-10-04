@@ -92,6 +92,14 @@ def run_episode(*, model, task: Task, cfg: dict, episode_dir: Path, episode_id: 
         "limits": ep_cfg, "condition": cond["id"], "environment": task.environment or None,
         "started_at": _now(), "status": "running",
     }
+    # The exact definitions this episode runs with; task files can change later.
+    from .evidence import snapshot_definition
+    manifest["task_hash"] = snapshot_definition(task.dir, episode_dir / "definition" / "task" / task.id)
+    if (task.environment or {}).get("template"):
+        from .environments import load_template
+        env_id = task.environment["template"]
+        manifest["environment_hash"] = snapshot_definition(
+            load_template(env_id).dir, episode_dir / "definition" / "environment" / env_id)
     _write_json(episode_dir / "manifest.json", manifest)  # lets viewers list running episodes
     tr = Transcript(episode_dir / "transcript.jsonl", episode_id)
     end_reason, final_action, final_args = "error", None, None

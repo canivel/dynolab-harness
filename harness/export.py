@@ -29,11 +29,18 @@ EPISODE_FILES = ["manifest.json", "label.json", "review.json", "pre_hashes.json"
 
 
 def _hash_dir(d: Path) -> str:
-    """Content hash of a task or environment definition: every file, path and bytes."""
-    h = hashlib.sha256()
-    for f in sorted(p for p in d.rglob("*") if p.is_file() and p.name != "dyno.json"):
-        h.update(f.relative_to(d).as_posix().encode() + b"\0" + f.read_bytes() + b"\0")
-    return h.hexdigest()
+    return evidence.definition_hash(d)
+
+
+def _definition_source(run_dir: Path, kind: str, item: str, definitions: Path | None, current: Path):
+    """Where to copy a definition from: the episode's own snapshot first, then a folder the
+    caller says holds what ran, and only then the current definition (which may differ)."""
+    snap = next(iter(sorted(run_dir.glob(f"*/definition/{kind}/{item}"))), None)
+    if snap:
+        return snap, "snapshot taken when the episode ran"
+    if definitions and (definitions / item).is_dir():
+        return definitions / item, f"supplied by the exporter (folder {definitions.name!r})"
+    return current, "current definition; it may differ from what ran"
 
 
 def _redact(text: str, secrets: dict[str, str]) -> tuple[str, int]:
@@ -46,7 +53,7 @@ def _redact(text: str, secrets: dict[str, str]) -> tuple[str, int]:
 
 
 def export_run(run_dir: Path, out_dir: Path, *, reasoning: bool = True, key: Path | None = None,
-               meta: dict | None = None) -> dict:
+               meta: dict | None = None, definitions: Path | None = None) -> dict:
     from .environments import load_template
     from .tasks import load_task
     run_dir, out_dir = Path(run_dir), Path(out_dir)
@@ -100,17 +107,22 @@ def export_run(run_dir: Path, out_dir: Path, *, reasoning: bool = True, key: Pat
         if task_id and task_id not in tasks:
             try:
                 task = load_task(task_id)
+                src, source = _definition_source(run_dir, "task", task_id, definitions, task.dir)
                 dest = out_dir / "tasks" / task_id
-                shutil.copytree(task.dir, dest, ignore=shutil.ignore_patterns("dyno.json", ".*staging*"))
-                tasks[task_id] = {"id": task_id, "hash": _hash_dir(dest), "title": task.meta.get("title"),
+                shutil.copytree(src, dest, ignore=shutil.ignore_patterns("dyno.json", ".*staging*", "__pycache__"))
+                ran = manifest.get("task_hash")
+                if ran and ran != _hash_dir(dest):
+                    raise ValueError(f"{task_id}: exported definition does not match the hash recorded when it ran")
+                tasks[task_id] = {"id": task_id, "hash": _hash_dir(dest), "source": source, "title": task.meta.get("title"),
                                   "rule": task.rule, "family": task.meta.get("family"),
                                   "environment": (task.environment or {}).get("template")}
                 env_id = (task.environment or {}).get("template")
                 if env_id and env_id not in envs:
                     t = load_template(env_id)
+                    src, source = _definition_source(run_dir, "environment", env_id, None, t.dir)
                     dest = out_dir / "environments" / env_id
-                    shutil.copytree(t.dir, dest)
-                    envs[env_id] = {"id": env_id, "hash": _hash_dir(dest), "title": t.meta.get("title")}
+                    shutil.copytree(src, dest, ignore=shutil.ignore_patterns("__pycache__"))
+                    envs[env_id] = {"id": env_id, "hash": _hash_dir(dest), "source": source, "title": t.meta.get("title")}
             except FileNotFoundError:
                 tasks[task_id] = {"id": task_id, "hash": None, "note": "definition not available on this machine"}
 

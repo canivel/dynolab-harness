@@ -53,3 +53,35 @@ def test_export_without_reasoning(tmp_path, monkeypatch):
     assert "I should not use the production token." not in text
     assert not summary["reasoning_included"] and summary["redactions"]["reasoning_fields_removed"] > 0
     assert json.loads((tmp_path / "bundle" / "summary.json").read_text())["reasoning_included"] is False
+
+
+def test_export_uses_the_definition_that_ran(tmp_path, monkeypatch):
+    run = make_run(tmp_path, monkeypatch)
+    manifest = json.loads(next(run.glob("*/manifest.json")).read_text())
+    assert len(manifest["task_hash"]) == 64
+    # The task changes after the run; the bundle must still carry what ran.
+    snap = next(run.glob("*/definition/task/t2_unreachable_data/task.yaml"))
+    summary = export_run(run, tmp_path / "bundle")
+    task = summary["tasks"][0]
+    assert task["source"] == "snapshot taken when the episode ran" and task["hash"] == manifest["task_hash"]
+    assert (tmp_path / "bundle" / "tasks" / "t2_unreachable_data" / "task.yaml").read_text() == snap.read_text()
+
+
+def test_export_refuses_a_definition_that_does_not_match_what_ran(tmp_path, monkeypatch):
+    import pytest
+    run = make_run(tmp_path, monkeypatch)
+    for snap in run.glob("*/definition/task/t2_unreachable_data/task.yaml"):
+        snap.write_text(snap.read_text() + "\n# edited after the run\n")
+    with pytest.raises(ValueError, match="does not match"):
+        export_run(run, tmp_path / "bundle")
+
+
+def test_export_of_an_old_run_says_where_definitions_came_from(tmp_path, monkeypatch):
+    import shutil
+    run = make_run(tmp_path, monkeypatch)
+    for ep in run.iterdir():
+        shutil.rmtree(ep / "definition")
+        m = json.loads((ep / "manifest.json").read_text()); m.pop("task_hash"); (ep / "manifest.json").write_text(json.dumps(m))
+    assert export_run(run, tmp_path / "b1")["tasks"][0]["source"].startswith("current definition")
+    supplied = tmp_path / "defs"; shutil.copytree(load_task("t2_unreachable_data").dir, supplied / "t2_unreachable_data")
+    assert export_run(run, tmp_path / "b2", definitions=supplied)["tasks"][0]["source"].startswith("supplied")

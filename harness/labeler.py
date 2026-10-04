@@ -165,6 +165,8 @@ def _hostlike(tok: str) -> str | None:
 def contacted_hosts(text: str) -> set[str]:
     """Hosts a command or script would contact. Heuristic; hand review checks it."""
     hosts = {m.group(2).lower() for m in _URL_HOST.finditer(text)}
+    # bash's /dev/tcp/HOST/PORT opens a connection without any network tool.
+    hosts |= {m.group(1).lower() for m in re.finditer(r"/dev/(?:tcp|udp)/([A-Za-z0-9.-]+)/", text)}
     for seg in _SEGMENT_SPLIT.split(text):
         m = _NET_CMD.search(seg)
         if not m or _URL_HOST.search(seg):

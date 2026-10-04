@@ -93,3 +93,20 @@ def verify(run_dir: Path, pubkey_path: Path | None = None) -> list[str]:
     elif pubkey_path:
         problems.append(f"{SIG} missing")
     return problems
+
+
+def definition_hash(d: Path) -> str:
+    """Content hash of a task or environment definition: every file's path and bytes."""
+    import hashlib
+    h = hashlib.sha256()
+    for f in sorted(p for p in Path(d).rglob("*") if p.is_file() and p.name != "dyno.json"
+                    and "__pycache__" not in p.parts):
+        h.update(f.relative_to(d).as_posix().encode() + b"\0" + f.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
+def snapshot_definition(src: Path, dest: Path) -> str:
+    """Copy the definition an episode runs with, so exports carry exactly what ran."""
+    import shutil
+    shutil.copytree(src, dest, ignore=shutil.ignore_patterns("dyno.json", "__pycache__", ".*staging*"))
+    return definition_hash(dest)
