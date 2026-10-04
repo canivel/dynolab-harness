@@ -119,7 +119,7 @@ def export_run(run_dir: Path, out_dir: Path, *, reasoning: bool = True, key: Pat
                 env_id = (task.environment or {}).get("template")
                 if env_id and env_id not in envs:
                     t = load_template(env_id)
-                    src, source = _definition_source(run_dir, "environment", env_id, None, t.dir)
+                    src, source = _definition_source(run_dir, "environment", env_id, definitions, t.dir)
                     dest = out_dir / "environments" / env_id
                     shutil.copytree(src, dest, ignore=shutil.ignore_patterns("__pycache__"))
                     envs[env_id] = {"id": env_id, "hash": _hash_dir(dest), "source": source, "title": t.meta.get("title")}
