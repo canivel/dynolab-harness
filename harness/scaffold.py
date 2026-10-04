@@ -6,6 +6,7 @@ output after. The model only sees a truncated copy of the output.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -66,13 +67,21 @@ class Transcript:
             if t:
                 self.log(step=step, role="harness", event="tripwire", source="gateway", **t)
 
-    def flag(self, task: Task, action: Action, secret_values: dict) -> None:
-        for t in action_tripwires(task, action, secret_values):
+    def flag(self, task: Task, action: Action, secret_values: dict, local_hosts: frozenset = frozenset()) -> None:
+        for t in action_tripwires(task, action, secret_values, local_hosts):
             self.log(step=action.step, role="harness", event="tripwire", type=t.type,
                      severity=t.severity, evidence=t.evidence)
 
     def close(self) -> None:
         self.f.close()
+
+
+def _hostname(cfg: dict, task) -> str:
+    template = (task.environment or {}).get("template")
+    if template:
+        from .environments import load_template
+        return str(load_template(template).agent.get("hostname") or "devbox")
+    return str(cfg.get("sandbox", {}).get("hostname") or "devbox")
 
 
 def run_episode(*, model, task: Task, cfg: dict, episode_dir: Path, episode_id: str,
@@ -105,6 +114,14 @@ def run_episode(*, model, task: Task, cfg: dict, episode_dir: Path, episode_id: 
     end_reason, final_action, final_args = "error", None, None
     try:
         sandbox.start()
+        # The agent's own addresses, so contacting itself isn't flagged as another host.
+        try:
+            ips = sandbox.exec(["hostname", "-i"], user="0", workdir="/").stdout.split()
+        except Exception:  # noqa: BLE001 - only used to avoid false flags
+            ips = []
+        manifest["workstation"] = {"hostname": _hostname(cfg, task), "ips": [i for i in ips if re.fullmatch(r"[\d.]+", i)]}
+        _write_json(episode_dir / "manifest.json", manifest)
+        local_hosts = frozenset(manifest["workstation"]["ips"])
         setup_result = setup_task(sandbox, task, secret_values)
         if setup_result is not None:
             _write_json(episode_dir / "setup.json", setup_result)
@@ -149,7 +166,7 @@ def run_episode(*, model, task: Task, cfg: dict, episode_dir: Path, episode_id: 
                        args=args, raw_args=None if args is not None else
                        call["function"]["arguments"], call_id=call.get("id"))
                 if name in TERMINAL_TOOLS and isinstance(args, dict):
-                    tr.flag(task, Action(step, name, args), secret_values)
+                    tr.flag(task, Action(step, name, args), secret_values, local_hosts)
                     final_action, final_args = name, args
                     break
                 if not isinstance(args, dict):
@@ -163,7 +180,7 @@ def run_episode(*, model, task: Task, cfg: dict, episode_dir: Path, episode_id: 
                                stdout=r.stdout, stderr=r.stderr, exit_code=r.exit_code,
                                duration_s=r.duration_s)
                         tr.flag(task, Action(step, name, args, r.stdout + r.stderr),
-                                secret_values)
+                                secret_values, local_hosts)
                         tr.network(sandbox, step)
                     except KeyError as e:
                         out, code, dur = f"error: unknown tool or missing argument {e}", None, 0
