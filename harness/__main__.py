@@ -13,7 +13,7 @@ import requests
 import yaml
 
 from . import evidence, ledger
-from .config import MOCK_DIRS, RUNS_DIR, find, load_config
+from .config import RUNS_DIR, load_config
 from .isolation import DESCRIPTIONS, run_checks
 from .labeler import label_episode
 from .model import ScriptedModel, OpenAICompatModel
@@ -106,9 +106,15 @@ def cmd_control(cfg, args) -> int:
     run_dir = Path(args.out or RUNS_DIR / f"control-{_stamp()}")
     failures = []
     results = []
-    for task_id in args.tasks or cfg["pilot"]["plan"]:
-        for behaviour in ("honest", "rule_break"):
-            path = find(MOCK_DIRS, task_id, f"{behaviour}.yaml") / f"{behaviour}.yaml"
+    from .controls import BEHAVIOURS, control_path, tasks_with_controls
+    for task_id in args.tasks or tasks_with_controls():
+        for behaviour in BEHAVIOURS:
+            path = control_path(task_id, behaviour)
+            if path is None:
+                failures.append(f"{task_id}/{behaviour}: no script (add controls/{behaviour}.yaml to the task)")
+                results.append({"task": task_id, "behaviour": behaviour, "passed": False,
+                                "outcome": None, "tripwires": [], "error": "missing script"})
+                continue
             expect = yaml.safe_load(path.read_text())["expect"]
             label = _run_one(cfg, ScriptedModel(path), task_id, run_dir,
                              f"{task_id}-{behaviour}", seed=None)
@@ -119,7 +125,8 @@ def cmd_control(cfg, args) -> int:
             print(f"[{'PASS' if ok else 'FAIL'}] {task_id}/{behaviour}: outcome={label['outcome']} "
                   f"tripwires={sorted(got)}", flush=True)
             results.append({"task": task_id, "behaviour": behaviour, "passed": ok,
-                            "outcome": label["outcome"], "tripwires": sorted(got)})
+                            "outcome": label["outcome"], "tripwires": sorted(got),
+                            "expected": expect, "script": str(path)})
             if not ok:
                 failures.append(f"{task_id}/{behaviour}: expected {expect}, missing {sorted(missing)}, "
                                 f"unexpected {sorted(unexpected)}")
@@ -165,7 +172,7 @@ def cmd_pilot(cfg, args) -> int:
         return 1
     if cmd_check(cfg, args):
         return 1
-    if not args.skip_control and cmd_control(cfg, argparse.Namespace(out=None, tasks=None)):
+    if not args.skip_control and cmd_control(cfg, argparse.Namespace(out=None, tasks=list(cfg["pilot"]["plan"]))):
         print("Positive controls failed. Fix the labeler before running the pilot.")
         return 1
     run_dir = Path(args.out or RUNS_DIR / f"pilot-{_stamp()}")
@@ -211,6 +218,7 @@ def cmd_tasks(cfg, args) -> int:
     """List tasks as JSON, for viewers such as Dyno that don't parse YAML."""
     from .config import is_builtin
     from .tasks import list_task_ids
+    from .controls import BEHAVIOURS, control_path
     tasks = [load_task(i) for i in list_task_ids()]
     print(json.dumps({"tasks": [{"id": t.id, "rule": t.rule, "prompt": t.prompt,
                                  "allowed_hosts": t.allowed_hosts,
@@ -223,6 +231,7 @@ def cmd_tasks(cfg, args) -> int:
                                  "honest_checks": {"must_report": t.honest_checks.get("must_report", []),
                                                    "state_checks": [c.get("name") for c in t.honest_checks.get("state_checks", [])]},
                                  "limits": t.limits, "environment": t.environment or None,
+                                 "controls": {b: bool(control_path(t.id, b)) for b in BEHAVIOURS},
                                  "builtin": is_builtin(t.dir), "path": str(t.dir)} for t in tasks],
                       "model": {k: cfg["model"].get(k) for k in ("base_url", "id", "revision")},
                       # Exactly what the model under test receives besides the task and tool output.
@@ -297,7 +306,13 @@ def cmd_task_check(cfg, args) -> int:
         for used in re.findall(r"\{\{secret:(\w+)\}\}", text):
             if used not in names:
                 errors.append(f"files/{f['source']} uses undeclared secret {used!r}")
-    print(json.dumps({"ok": not errors, "errors": errors, "task": task.id}))
+    from .controls import check_task
+    controls = check_task(task, folder)
+    errors += controls["errors"]
+    warnings = [f"no {b} control yet: add controls/{b}.yaml so this task's labels can be tested"
+                for b, present in controls["present"].items() if not present]
+    print(json.dumps({"ok": not errors, "errors": errors, "warnings": warnings,
+                      "controls": controls["present"], "task": task.id}))
     return 0 if not errors else 1
 
 
@@ -549,7 +564,7 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check", help="run isolation checks").add_argument("--json", action="store_true")
     sub.add_parser("smoke", help="smoke-test tool calling on the model server")
-    p = sub.add_parser("control", help="run scripted positive controls")
+    p = sub.add_parser("control", help="run scripted positive controls (default: every task that has them)")
     p.add_argument("--tasks", nargs="*")
     p.add_argument("--out")
     p = sub.add_parser("episode", help="run a single episode")

@@ -5,7 +5,8 @@ import json
 import pytest
 import yaml
 
-from harness.config import MOCKS_DIR, load_config
+from harness.config import load_config
+from harness.controls import control_path, tasks_with_controls, validate
 from harness.labeler import label_episode
 from harness.model import ScriptedModel
 from harness.scaffold import run_episode
@@ -13,14 +14,18 @@ from harness.tasks import load_task
 
 from fake_sandbox import FakeSandbox
 
-CASES = [(t, b) for t in ("t1_unpassable_tests", "t2_unreachable_data", "t3_impossible_quota")
-         for b in ("honest", "rule_break")]
+PILOT = ("t1_unpassable_tests", "t2_unreachable_data", "t3_impossible_quota")
+CASES = [(t, b) for t in PILOT for b in ("honest", "rule_break")]
+# Tasks whose controls need no environment instance can be checked without Docker.
+OFFLINE = [(t, b) for t in tasks_with_controls() if t in PILOT + ("t0_locked_report",)
+           for b in ("honest", "rule_break")]
 
 
-@pytest.mark.parametrize("task_id,behaviour", CASES)
+@pytest.mark.parametrize("task_id,behaviour", OFFLINE)
 def test_control(tmp_path, monkeypatch, task_id, behaviour):
     monkeypatch.setattr("harness.scaffold.image_digest", lambda image: "sha256:test")
-    script = MOCKS_DIR / task_id / f"{behaviour}.yaml"
+    script = control_path(task_id, behaviour)
+    assert validate(load_task(task_id), behaviour, yaml.safe_load(script.read_text())) == []
     expect = yaml.safe_load(script.read_text())["expect"]
     sb = FakeSandbox()
     run_episode(model=ScriptedModel(script), task=load_task(task_id), cfg=load_config(),
@@ -118,7 +123,7 @@ class RecordingModel(ScriptedModel):
 def test_evaluation_never_reaches_the_agent(tmp_path, monkeypatch, task_id, behaviour):
     """Tripwires, labels and checks are recorded for evaluators only; the model never sees them."""
     monkeypatch.setattr("harness.scaffold.image_digest", lambda image: "sha256:test")
-    model = RecordingModel(MOCKS_DIR / task_id / f"{behaviour}.yaml")
+    model = RecordingModel(control_path(task_id, behaviour))
     run_episode(model=model, task=load_task(task_id), cfg=load_config(), episode_dir=tmp_path / "ep",
                 episode_id="ep", seed=1, sandbox=FakeSandbox())
     label = label_episode(tmp_path / "ep")

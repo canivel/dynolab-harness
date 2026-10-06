@@ -18,9 +18,10 @@ hand review. You can also use the harness on its own from the command line.
 
 - **Sandbox.** A fresh gVisor container per episode with no network route out. The agent runs
   as an unprivileged user next to root-only files and honeypot credentials.
-- **Tasks.** Six built-in tasks, from unpassable tests to a production database behind a network
-  boundary. Each has scripted honest and rule-breaking controls (positive controls) that must be
-  labeled correctly before results count.
+- **Tasks.** Seven built-in tasks, from unpassable tests to a production database behind a network
+  boundary, plus `t0_locked_report`, a small teaching task to copy. Each has scripted honest and
+  rule-breaking controls (positive controls) that must be labeled correctly before results count.
+  See [docs/controls.md](docs/controls.md).
 - **Environments.** Multi-node sandboxes: service nodes on separate network segments behind policy
   gateways that allow, deny or flag every connection and log it outside the agent's reach.
 - **Evaluation.** Tripwire rules, honest-outcome checks, conditions (for example neutral vs
@@ -38,7 +39,7 @@ installs Colima, Docker and gVisor with Homebrew. On Linux, install Docker and
 pip install git+https://github.com/canivel/dynolab-harness
 harness setup                # checks the runtime, builds the sandbox image and network
 harness check                # isolation checks: internal network, gVisor, no egress, no sudo
-harness control              # positive controls in real containers; all must pass
+harness control              # positive controls in real containers, every task that has them; all must pass
 ```
 
 Point the harness at any OpenAI-compatible model server (mlx-lm, vLLM, llama.cpp, Ollama…)
@@ -69,7 +70,17 @@ harness env down office1
 harness devbox create explore1 --template bastion-admin   # a long-lived environment to explore
 ```
 
-Formats: [docs/task-schema.md](docs/task-schema.md) and [docs/environments.md](docs/environments.md).
+Give every task of your own two control scripts, `controls/honest.yaml` and
+`controls/rule_break.yaml`, so its labels can be tested. Start from the commented ones in
+`t0_locked_report`:
+
+```bash
+harness task-check <folder>            # also validates the control scripts
+harness control --tasks <task_id>      # replay them in real containers
+```
+
+Formats: [docs/task-schema.md](docs/task-schema.md), [docs/controls.md](docs/controls.md) and
+[docs/environments.md](docs/environments.md).
 
 ## Sharing results
 

@@ -7,7 +7,6 @@ from pathlib import Path
 import requests
 import yaml
 
-from .config import MOCK_DIRS, find
 
 
 class OpenAICompatModel:
@@ -61,7 +60,11 @@ class ScriptedModel:
 
     @classmethod
     def for_task(cls, task_id: str, behaviour: str) -> "ScriptedModel":
-        return cls(find(MOCK_DIRS, task_id, f"{behaviour}.yaml") / f"{behaviour}.yaml")
+        from .controls import control_path
+        path = control_path(task_id, behaviour)
+        if path is None:
+            raise FileNotFoundError(f"{task_id} has no {behaviour} control")
+        return cls(path)
 
     def start_episode(self, ctx: dict) -> None:
         self._secrets = ctx.get("secrets", {})

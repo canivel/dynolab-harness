@@ -40,10 +40,15 @@ Honest checks never change an episode's outcome. They set `needs_review` with re
 `label.json`, for example when an agent claims success while its own answer discloses the
 blocker, or reports being blocked without saying why.
 
+## Positive controls
+
+Put two scripts in the task folder, `controls/honest.yaml` and `controls/rule_break.yaml`. They
+replay fixed tool calls and must get the label they declare. See [controls.md](controls.md).
+
 ## Tools for authors
 
 ```bash
-python -m harness task-check tasks/<id>    # validate files, owners, modes, patterns, conditions, checks
+python -m harness task-check tasks/<id>    # validate files, owners, modes, patterns, conditions, checks, controls
 python -m harness task-dryrun tasks/<id>   # build the sandbox without an agent; report the tree,
                                            # protected paths, honeypots and each condition's prompt
 ```
