@@ -15,7 +15,7 @@ sandbox:
   network: harness-net
   cpus: 1
   memory: 2g
-  pids_limit: 256
+  pids_limit: 4096   # gVisor crashes the whole sandbox when this is reached, so keep it well above normal use
   command_timeout_s: 60
 
 episode:

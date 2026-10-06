@@ -21,7 +21,7 @@ from .sandbox import DockerSandbox
 from .scaffold import NUDGE, SYSTEM_PROMPT, run_episode
 from .tools import TOOLS
 from .summarize import summarize
-from .tasks import load_task
+from .tasks import Task, load_task
 
 
 def _stamp() -> str:
@@ -137,6 +137,70 @@ def cmd_control(cfg, args) -> int:
     return 1 if failures else 0
 
 
+def _room_spec(path: str) -> tuple[dict, object]:
+    from .room import plan
+    spec = json.loads(Path(path).read_text())
+    template = None
+    if spec.get("environment"):
+        from .environments import load_template
+        try:
+            template = load_template(spec["environment"])
+        except FileNotFoundError:
+            return {**plan(spec), "errors": [f"Unknown environment {spec['environment']}"]}, None
+    return plan(spec, template), template
+
+
+def cmd_room_plan(cfg, args) -> int:
+    """How each rule will be watched, and what must be fixed before the room can run. JSON."""
+    from .room import KINDS
+    planned, template = _room_spec(args.spec)
+    planned["detectors"] = [{"kind": k, "label": v} for k, v in KINDS.items()]
+    if template is not None:
+        planned["gateway"] = [{"host": g["host"], "port": g["port"], "action": g["action"]} for g in template.gateway]
+    print(json.dumps(planned, indent=2))
+    return 0
+
+
+def cmd_alert_check(cfg, args) -> int:
+    """Try a phrase alert on a past room's transcript: the passages it would have fired on. JSON."""
+    from .alerts import check_transcript, validate
+    alert = json.loads(Path(args.alert).read_text())
+    errors = validate(alert) if alert.get("kind") == "phrases" else ["Only phrase alerts can be tried on a past test."]
+    events = [json.loads(line) for line in Path(args.transcript).read_text(errors="replace").splitlines() if line.strip()]
+    print(json.dumps({"errors": errors, "hits": [] if errors else check_transcript(alert, events)[:200]}))
+    return 0
+
+
+def cmd_room_prompts(cfg, args) -> int:
+    """The default agent prompt templates and the placeholders they can use. JSON."""
+    from .room import DEFAULT_PROMPTS, PLACEHOLDERS
+    print(json.dumps({"prompts": DEFAULT_PROMPTS, "placeholders": PLACEHOLDERS}, indent=2))
+    return 0
+
+
+def cmd_room(cfg, args) -> int:
+    """Several agents, one sandbox, one group chat, and a hidden Observer."""
+    from .room import run_room
+    planned, _ = _room_spec(args.spec)
+    if planned["errors"]:
+        print("Room spec has problems:\n  " + "\n  ".join(planned["errors"]))
+        return 2
+    run_dir = Path(args.out or RUNS_DIR / f"room-{_stamp()}")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    episode_id = f"room-{_stamp()}"
+    task = Task(id="room", prompt="", rule="", dir=run_dir,
+                environment={"template": planned["environment"]} if planned["environment"] else {})
+    sandbox = _episode_sandbox(cfg, task, episode_id, None)
+    models = {a["id"]: OpenAICompatModel({**cfg["model"], "base_url": a["base_url"], "id": a["model"]})
+              for a in planned["agents"]}
+    result = run_room(spec=planned, models=models, cfg=cfg, episode_dir=run_dir / episode_id,
+                      episode_id=episode_id, sandbox=sandbox,
+                      new_model=lambda a, _: OpenAICompatModel({**cfg["model"], "base_url": a["base_url"], "id": a["model"]}),
+                      messages=Path(args.messages) if args.messages else None)
+    print(f"{episode_id}: {result['verdict']}")
+    return 0
+
+
 def cmd_episode(cfg, args) -> int:
     run_dir = Path(args.out or RUNS_DIR / f"adhoc-{_stamp()}")
     model = (ScriptedModel.for_task(args.task, args.model.split(":", 1)[1])
@@ -246,7 +310,7 @@ def cmd_tasks(cfg, args) -> int:
 def cmd_task_check(cfg, args) -> int:
     """Validate one task folder: it loads, its files exist, and its patterns compile."""
     import re
-    from .tasks import load_task
+    from .tasks import Task, load_task
     folder = Path(args.task_dir).resolve()
     errors = []
     try:
@@ -615,6 +679,15 @@ def main(argv=None) -> int:
     p.add_argument("--template")
     p.add_argument("--size", choices=["s", "m", "l"], default="m")
     p.add_argument("--checkout", help="git repository to copy into /workspace")
+    sub.add_parser("room-plan", help="check a room spec and show how each rule is watched (JSON)").add_argument("--spec", required=True)
+    sub.add_parser("room-prompts", help="the default agent prompt templates and their placeholders (JSON)")
+    p = sub.add_parser("alert-check", help="try a phrase alert on a room transcript (JSON)")
+    p.add_argument("--alert", required=True)
+    p.add_argument("--transcript", required=True)
+    p = sub.add_parser("room", help="several agents in one sandbox and group chat, with a hidden Observer")
+    p.add_argument("--spec", required=True, help="room spec JSON (docs/rooms.md)")
+    p.add_argument("--messages", help="JSONL file the person appends chat messages to; keeps the room open for follow-ups")
+    p.add_argument("--out")
     sub.add_parser("task-check", help="validate one task folder").add_argument("task_dir")
     sub.add_parser("task-dryrun", help="build a task's sandbox without an agent and report it").add_argument("task_dir")
 

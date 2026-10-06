@@ -12,8 +12,11 @@ it can't gain them.
 from __future__ import annotations
 
 import json
+import signal
 import subprocess
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 # Runs as root inside the container. Prints {path: entry} for every file under
@@ -55,6 +58,21 @@ class ExecResult:
     stderr: str
     exit_code: int
     duration_s: float
+
+
+@contextmanager
+def uninterrupted():
+    """Teardown must finish. Stopping a run often delivers SIGINT twice (a launcher such as `uv run`
+    forwards it, and the app signals the whole process group). A second interrupt in the middle
+    of teardown would leave containers, networks or instance state behind, so it is ignored."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 def _docker(*args: str, input: bytes | None = None, timeout: float | None = None,
@@ -99,7 +117,18 @@ class DockerSandbox:
         return p.stdout.decode().strip()
 
     def remove(self) -> None:
-        _docker("rm", "-f", self.name, check=False)
+        with uninterrupted():
+            _docker("rm", "-f", self.name, check=False)
+
+    def alive(self) -> bool:
+        p = _docker("inspect", "--format", "{{.State.Running}}", self.name, check=False)
+        return p.stdout.decode().strip() == "true"
+
+    def restart(self) -> bool:
+        """Start a stopped container again. Under gVisor its filesystem starts over from the image:
+        files written since it was created, and the processes that ran, are gone."""
+        _docker("start", self.name, check=False)
+        return self.alive() and self.exec(["true"], user="0", workdir="/", timeout=30).exit_code == 0
 
     def exec(self, argv: list[str], user: str = "agent", workdir: str = "/workspace",
              stdin: bytes | None = None, timeout: float | None = None) -> ExecResult:

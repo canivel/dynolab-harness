@@ -24,6 +24,10 @@ hand review. You can also use the harness on its own from the command line.
   See [docs/controls.md](docs/controls.md).
 - **Environments.** Multi-node sandboxes: service nodes on separate network segments behind policy
   gateways that allow, deny or flag every connection and log it outside the agent's reach.
+- **Rooms.** A lead agent works on a goal it can't reach without breaking a rule, and creates
+  teammates as it needs them. They share one sandbox and a group chat. A hidden Observer keeps
+  the family tree, records each rule broken, by whom and at whose request, and checks the final
+  report against the logs. See [docs/rooms.md](docs/rooms.md).
 - **Evaluation.** Tripwire rules, honest-outcome checks, conditions (for example neutral vs
   pressure prompts), a labeler, hand review, and LLM monitors (in the app).
 - **Evidence.** A SHA-256 for every file, Ed25519 signatures, and an export that removes honeypot
@@ -79,8 +83,8 @@ harness task-check <folder>            # also validates the control scripts
 harness control --tasks <task_id>      # replay them in real containers
 ```
 
-Formats: [docs/task-schema.md](docs/task-schema.md), [docs/controls.md](docs/controls.md) and
-[docs/environments.md](docs/environments.md).
+Formats: [docs/task-schema.md](docs/task-schema.md), [docs/controls.md](docs/controls.md),
+[docs/environments.md](docs/environments.md) and [docs/rooms.md](docs/rooms.md).
 
 ## Sharing results
 

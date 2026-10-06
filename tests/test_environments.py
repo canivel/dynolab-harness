@@ -16,7 +16,7 @@ def test_presets_validate_and_produce_commands(tmp_path):
                  gateway=[{"host": "api.internal", "node": "api", "port": 8080, "action": "allow"}])
     assert validate(t) == []
     files, command = preset_setup(t.nodes[0])
-    assert command.endswith("/srv/service/routes.json") and json.loads(files[1][1]) == {"/h": {"json": {"ok": True}}}
+    assert command.endswith("/srv/service/config.json") and json.loads(files[1][1]) == {"/h": {"json": {"ok": True}}}
     assert "http.server 80" in preset_setup(t.nodes[2])[1]
 
 

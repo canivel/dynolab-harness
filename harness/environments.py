@@ -21,7 +21,7 @@ from pathlib import Path
 import yaml
 
 from .config import ENV_DIRS, INSTANCES_DIR, find, list_ids
-from .sandbox import DockerSandbox, ExecResult, _docker
+from .sandbox import DockerSandbox, ExecResult, _docker, uninterrupted
 
 GATEWAY_SCRIPT = Path(__file__).with_name("gateway.py")
 SERVICES = Path(__file__).with_name("builtin") / "services"
@@ -30,7 +30,15 @@ PRESETS = {
     "http-files": "Serves the node's files under /srv/www over HTTP",
     "mock-api": "Replies with configured JSON per path (routes)",
     "line-service": "TCP: a greeting, then one configured reply per line (replies)",
+    "object-store": "S3-style buckets over HTTP: list, download, and upload or delete when writable (objects, writable)",
+    "sql-db": "A SQL database (SQLite) queried over HTTP, seeded from CSV tables, optional password (tables, password)",
+    "vault": "Secrets behind a token, in the style of HashiCorp Vault (token, secrets)",
+    "mail-outbox": "Accepts email over HTTP and keeps every message, never delivers it (domain)",
 }
+# Each preset's script and the keys of its spec that go into its config file.
+_SCRIPTS = {"mock-api": ("mock_api.py", ("routes",)), "line-service": ("line_service.py", ("greeting", "replies", "default")),
+            "object-store": ("object_store.py", ("objects", "writable")), "sql-db": ("sql_db.py", ("tables", "password")),
+            "vault": ("vault.py", ("token", "secrets")), "mail-outbox": ("mail_outbox.py", ("domain",))}
 
 
 def preset_setup(node: dict) -> tuple[list[tuple[str, bytes]], str]:
@@ -39,16 +47,33 @@ def preset_setup(node: dict) -> tuple[list[tuple[str, bytes]], str]:
     port = int(svc["port"])
     if svc["preset"] == "http-files":
         return [], f"python3 -m http.server {port} --directory {svc.get('root', '/srv/www')}"
-    if svc["preset"] == "mock-api":
-        return [("/srv/service/mock_api.py", (SERVICES / "mock_api.py").read_bytes()),
-                ("/srv/service/routes.json", json.dumps(svc.get("routes", {})).encode())], \
-            f"python3 /srv/service/mock_api.py {port} /srv/service/routes.json"
-    return [("/srv/service/line_service.py", (SERVICES / "line_service.py").read_bytes()),
-            ("/srv/service/config.json", json.dumps({k: svc[k] for k in ("greeting", "replies", "default") if k in svc}).encode())], \
-        f"python3 /srv/service/line_service.py {port} /srv/service/config.json"
+    script, keys = _SCRIPTS[svc["preset"]]
+    config = svc.get("routes", {}) if svc["preset"] == "mock-api" else {k: svc[k] for k in keys if k in svc}
+    return [(f"/srv/service/{script}", (SERVICES / script).read_bytes()),
+            ("/srv/service/config.json", json.dumps(config).encode())], \
+        f"python3 /srv/service/{script} {port} /srv/service/config.json"
+
+
 NAME = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 HOST = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
 ACTIONS = ("allow", "deny", "flag")
+
+
+def _preset_errors(name, svc: dict) -> list[str]:
+    p, errors = svc["preset"], []
+    def is_map(key, values=str):
+        v = svc.get(key, {})
+        return isinstance(v, dict) and all(isinstance(k, str) and isinstance(x, values) for k, x in v.items())
+    if p == "object-store" and not is_map("objects"):
+        errors.append(f"node {name}: objects must map keys to text")
+    if p == "sql-db":
+        if not is_map("tables") or not svc.get("tables"):
+            errors.append(f"node {name}: tables must map table names to CSV text")
+        elif any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", t) for t in svc["tables"]):
+            errors.append(f"node {name}: table names: letters, digits and _")
+    if p == "vault" and (not svc.get("token") or not is_map("secrets")):
+        errors.append(f"node {name}: a vault needs a token and secrets")
+    return errors
 
 
 @dataclass
@@ -103,6 +128,8 @@ def validate(t: Template) -> list[str]:
                 errors.append(f"node {n.get('name')}: service port must be 1-65535")
             elif n.get("command"):
                 errors.append(f"node {n.get('name')}: use either a service preset or a command, not both")
+            else:
+                errors += _preset_errors(n.get("name"), svc)
         if n.get("image") and n["image"] not in t.images:
             errors.append(f"node {n.get('name')}: image {n['image']!r} is not declared under images")
         for f in n.get("files", []):
@@ -265,6 +292,10 @@ class Instance:
                         time.sleep(0.5)
 
     def down(self, quiet: bool = False) -> None:
+        with uninterrupted():
+            self._down(quiet)
+
+    def _down(self, quiet: bool) -> None:
         for kind in ("ps", "network"):
             args = ["ps", "-aq"] if kind == "ps" else ["network", "ls", "-q"]
             ids = _docker(*args, "--filter", f"label=harness.instance={self.name}", check=False).stdout.decode().split()
@@ -341,6 +372,13 @@ class Workstation:
             r = _docker("exec", "-u", "0", g["container"], "sh", "-c", "wc -c < /var/log/gateway.jsonl", check=False)
             self._offsets[host] = int(r.stdout.decode().strip() or 0)
 
+    def restart(self) -> bool:
+        """Start the crashed workstation again on the same networks, and pick up its address."""
+        ok = self.sandbox.restart()
+        if ok:
+            self.ip_addr = self.sandbox.ip(self.state["access_network"]) or self.ip_addr
+        return ok
+
     def network_events(self) -> list[dict]:
         events = []
         for host, g in self.state.get("gateways", {}).items():
@@ -359,10 +397,11 @@ class Workstation:
         return sorted(events, key=lambda e: e.get("ts", 0))
 
     def remove(self) -> None:
-        self.sandbox.remove()
-        if self.ephemeral is not None:
-            self.ephemeral.down(quiet=True)
-            self.ephemeral.state_path.unlink(missing_ok=True)  # temporary instances leave no record
+        with uninterrupted():
+            self.sandbox.remove()
+            if self.ephemeral is not None:
+                self.ephemeral.down(quiet=True)
+                self.ephemeral.state_path.unlink(missing_ok=True)  # temporary instances leave no record
 
 
 def network_tripwire(event: dict) -> dict | None:

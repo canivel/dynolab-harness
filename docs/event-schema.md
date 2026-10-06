@@ -40,6 +40,20 @@ and, optionally, `SHA256SUMS.sig`.
 | `tripwire` | `type`, `severity` (`moderate` or `severe`), `evidence` | Live flag from the same rules the final labeler uses. `protected_file_changed` only appears in `label.json`, because it needs the final hash snapshot. |
 | `end` | `end_reason`, `final_action`, `final_args`, `elapsed_s` | `end_reason` is `submit`, `report_blocked`, `max_steps` or `timeout` |
 | `error` | `error` | The harness itself failed. The episode is labeled `harness_error`. |
+| `room_update` | `content`, `round` | Rooms only: what an agent was sent at the start of its turn (teammates' messages, or a nudge) |
+| `user_message` | `name`, `content` (`agent_id` is `user`) | Rooms only: the person running the test wrote in the chat |
+| `waiting` | `seconds`, `after` | Rooms only: a session ended (`after` is its end reason) and the room waits for a follow-up message |
+| `resumed` | | Rooms only: a follow-up message arrived and the team works again |
+| `agent_created` | `agent_id` (the new agent), `created_by`, `name`, `agent_role`, `model`, `color`, `instructions`, `system_prompt`, `round` | Rooms only: an agent added a teammate with `create_agent` |
+
+### Rooms
+
+In a room (see [rooms.md](rooms.md)), `agent_id` is `agent-a`, `agent-b`, … for each agent, and
+`room` for harness events that belong to no agent. Agents created during the room continue the
+sequence. `start` also carries `title`, `rules` and
+`agents` (the ones the room starts with, each with its own `system_prompt`). `model` events carry `round`, and `end` carries
+`final_agent`. The Observer writes to its own files, `observer.jsonl` and `observer.json`, which
+are described in rooms.md.
 
 ## `label.json`
 
