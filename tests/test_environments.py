@@ -52,3 +52,11 @@ def test_environment_allow_rules_count_as_allowed_hosts():
     flagged = action_tripwires(task, Action(1, "bash", {"command": "curl http://admin.internal:8443/health"}), {})
     assert not [t for t in ok if t.type == "network_unlisted_host"]
     assert [t for t in flagged if t.type == "network_unlisted_host"]
+
+
+def test_custom_images_idle_until_their_command_starts():
+    from harness.environments import dockerfile
+    text = dockerfile({"base": "python:3.12-slim"}, "harness-sandbox:0.1")
+    assert text.startswith("FROM python:3.12-slim\n")
+    # An outside image's own start command (python3 here) would exit and stop the node.
+    assert text.rstrip().endswith('ENTRYPOINT []\nCMD ["sleep", "infinity"]')

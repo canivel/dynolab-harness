@@ -31,7 +31,7 @@ Tasks without one run in the single-box sandbox, as before.
 | Field | Meaning |
 |---|---|
 | `id`, `meta` | Name, title, description and tags |
-| `images` | Optional custom images: `{base, apt, pip, run}`. They are built once and tagged by a hash of their content. |
+| `images` | Optional custom images: `{base, apt, pip, run}`. They are built once and tagged by a hash of their content. `base` can be any image (`python:3.12-slim`, `node:22`); every node idles with `sleep infinity` until the harness starts its `command` with `bash`, so the base image's own start command never runs and the image needs bash. |
 | `segments` | Internal networks for service nodes. The agent never joins these. |
 | `nodes` | `{name, segment, image, dirs, files, setup, command, run_as}`. Files come from `environments/<id>/files/`. |
 | `gateway` | `{host, port, action: allow\|deny\|flag, node, target_port, tripwire, severity}` |

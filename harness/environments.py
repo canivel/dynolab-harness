@@ -172,6 +172,9 @@ def dockerfile(spec: dict, default_base: str) -> str:
     if spec.get("pip"):
         lines.append("RUN pip install --no-cache-dir " + " ".join(spec["pip"]))
     lines += [f"RUN {cmd}" for cmd in spec.get("run", [])]
+    # A node idles until the harness starts its command. An outside base image (python, node, …)
+    # would otherwise run its own start command, exit at once, and stop the node with it.
+    lines += ["ENTRYPOINT []", 'CMD ["sleep", "infinity"]']
     return "\n".join(lines) + "\n"
 
 
