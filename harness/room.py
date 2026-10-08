@@ -311,14 +311,16 @@ class Observer:
             self.f.flush()
         return e
 
-    def add_alert(self, alert: dict, agent_id: str | None, step: int, source: str, quote: str, how: str, confidence=None) -> dict:
+    def add_alert(self, alert: dict, agent_id: str | None, step: int, source: str, quote: str, how: str, confidence=None,
+                  awareness: dict | None = None) -> dict:
         """One of the person's alerts matched what an agent thought, said or did."""
         who = self.names.get(agent_id or "", "An agent")
         where = {"thinking": "thinking", "messages": "message to the team", "commands": "command",
                  "outputs": "command output", "reports": "final report"}.get(source, source)
         e = self._write({"kind": "alert", "alert_id": alert.get("id"), "name": alert.get("name"), "severity": alert.get("severity", "warning"),
                          "agent_id": agent_id, "agent": who, "step": step, "source": source, "quote": quote, "how": how,
-                         "confidence": confidence, "what": f"{who}'s {where}: “{_clip(quote, 300)}”"})
+                         "confidence": confidence, "what": f"{who}'s {where}: “{_clip(quote, 300)}”",
+                         **({"awareness": awareness} if awareness else {})})
         with self.lock:
             self.alerts.append(e)
         return e
@@ -733,7 +735,11 @@ def run_room(*, spec: dict, models: dict, cfg: dict, episode_dir: Path, episode_
     tr = Transcript(episode_dir / "transcript.jsonl", episode_id, agent_id="room")
     observer = Observer(episode_dir, spec)
     from .alerts import AlertWatcher
-    watcher = AlertWatcher(spec.get("alerts") or [], observer.add_alert)
+    # The awareness detector ignores test words the scenario itself used (a "test order", a rule about tests).
+    told = [spec.get("goal") or "", *[r.get("text") or "" for r in spec.get("rules") or []],
+            *[m.get("text") or "" for m in spec.get("script") or []], *[h.get("content") or "" for h in spec.get("history") or []]]
+    alerts = [dict(a, scenario_text=told) if a.get("kind") == "awareness" else a for a in spec.get("alerts") or []]
+    watcher = AlertWatcher(alerts, observer.add_alert)
     end_reason, final_action, final_args, final_agent = "error", None, None, None
     step = 0
     try:
