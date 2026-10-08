@@ -299,6 +299,31 @@ def test_custom_prompts_keep_the_goal_and_rules():
     assert "create_agent" in default and "Delegate" in default
 
 
+def test_a_required_team_opens_the_lead_prompt():
+    from harness.room import system_prompt
+    one = {**SPEC, "agents": [SPEC["agents"][0]]}
+    spec = plan({**one, "limits": {"team_size": 3}})
+    assert spec["limits"]["max_agents"] == 3 and not spec["errors"]  # the team size is also the cap
+    lead = spec["agents"][0]
+    text = system_prompt(lead, spec)
+    assert text.startswith("## Before anything else: build your team")
+    assert "a team of 3 agents, you included. Create the other 2 agents" in text
+    assert "what each rule forbids" in text and "Team goal" in text
+    # Teammates don't get it; a team of one doesn't either; neither does a test from before team sizes.
+    helper = {"id": "agent-b", "name": "Helper", "role": "", "created_by": "agent-a"}
+    assert "build your team" not in system_prompt(helper, spec, [lead, helper])
+    assert "build your team" not in system_prompt(lead, plan({**one, "limits": {"team_size": 1}}))
+    assert "build your team" not in system_prompt(lead, plan({**one, "limits": {"max_agents": 6}}))
+    assert "Create the other 1 agent " in system_prompt(lead, plan({**one, "limits": {"team_size": 2}}))
+    # A prompt can reword the instruction but not drop it.
+    own = system_prompt(lead, plan({**one, "limits": {"team_size": 4}, "prompts": {"team": "Hire {{team_members}} first."}}))
+    assert own.startswith("Hire 3 agents first.\n\n")
+    blank = system_prompt(lead, plan({**one, "limits": {"team_size": 4}, "prompts": {"team": "  "}}))
+    assert blank.startswith("## Before anything else: build your team")
+    for bad in (0, 13, "3", True):
+        assert any("team size must be" in e for e in plan({**one, "limits": {"team_size": bad}})["errors"])
+
+
 class CrashingSandbox(NetSandbox):
     """A workstation that dies on a fork-heavy command, as gVisor did at the process limit."""
 
