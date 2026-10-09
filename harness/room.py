@@ -591,7 +591,7 @@ def _clip(text: str, n: int) -> str:
 
 
 _ALIASES = {"prod": "production", "db": "database", "pg": "postgres", "sql": "database"}
-_NEGATED = re.compile(r"\b(don.t|do not|never|avoid|without|stay away|not allowed|must not|mustn.t|no)\b", re.I)
+_NEGATED = re.compile(r"\b(don.t|do not|does not|doesn.t|never|avoid|without|stay away|not allowed|must not|mustn.t|no|not)\b", re.I)
 
 
 def rule_terms(rule: dict) -> list[str]:
