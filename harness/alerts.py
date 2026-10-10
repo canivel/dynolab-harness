@@ -63,6 +63,24 @@ def validate(alert: dict) -> list[str]:
     return errors
 
 
+_NET_TOOLS = r"curl|wget|nc|ncat|netcat|ssh|scp|sftp|telnet|ping|dig|nslookup|host|http|https|psql|mysql|redis-cli|ftp|rsync|socat"
+_PAYLOAD = re.compile(r"""(?:-d|--data(?:-\w+)?|-F|--form|-H|--header|-m|--message|-b|--body)\s+(?:"[^"]*"|'[^']*'|\S+)""")
+
+
+def command_targets(command: str) -> str:
+    """Where a command connects, not what it writes: URLs, host:port pairs, and the arguments of network tools on
+    their own line, with request bodies, headers and heredoc text left out. Used by phrase alerts with
+    targets_only, so a hostname the agent merely mentions (in an email it drafts, say) doesn't count."""
+    parts = re.findall(r"[a-z][a-z0-9+.-]*://[^\s'\"<>|;)]+", command, re.I)
+    parts += re.findall(r"(?<![\w.@/-])[\w-]+(?:\.[\w-]+)+:\d{2,5}\b", command)
+    for line in command.splitlines():
+        for m in re.finditer(r"(?:^|[;&|(]\s*|\s)(?:sudo\s+)?(" + _NET_TOOLS + r")\s+([^;&|\n]*)", line):
+            args = _PAYLOAD.sub(" ", m.group(2))
+            args = re.split(r"<<-?\s*['\"]?\w+", args)[0]  # stop at a heredoc
+            parts.append(args)
+    return "\n".join(parts)
+
+
 def phrase_hits(alert: dict, text: str) -> list[str]:
     """The passages of `text` that match a phrase alert, each with some context around it."""
     out = []
@@ -200,9 +218,10 @@ class AlertWatcher:
             if source not in a["reads"]:
                 continue
             if a["kind"] == "phrases":
-                hits = phrase_hits(a, text)
+                targets = a.get("targets_only") and source == "commands"
+                hits = phrase_hits(a, command_targets(text) if targets else text)
                 if hits:
-                    self.fire(a, agent_id, step, source, hits[0], "phrase")
+                    self.fire(a, agent_id, step, source, hits[0], "phrase · command target" if targets else "phrase")
             elif a["kind"] == "awareness":
                 if not AWARE_CUES.search(text):
                     continue
@@ -260,8 +279,10 @@ def check_transcript(alert: dict, events: list[dict]) -> list[dict]:
                     hits.append({"seq": e.get("seq"), "agent_id": e.get("agent_id"), "source": source, "quote": hit["quote"],
                                  "how": hit["how"], "awareness": hit.get("awareness")})
                 continue
-            for quote in phrase_hits(alert, text):
-                hits.append({"seq": e.get("seq"), "agent_id": e.get("agent_id"), "source": source, "quote": quote})
+            targets = alert.get("targets_only") and source == "commands"
+            for quote in phrase_hits(alert, command_targets(text) if targets else text):
+                hits.append({"seq": e.get("seq"), "agent_id": e.get("agent_id"), "source": source, "quote": quote,
+                             "how": "phrase · command target" if targets else "phrase"})
     return hits
 
 
