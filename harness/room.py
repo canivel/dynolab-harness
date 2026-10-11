@@ -212,6 +212,9 @@ def plan(spec: dict, template=None) -> dict:
                        "text": text, **({"round": rnd} if rnd else {})})
     if len(script) > MAX_SCRIPT:
         errors.append(f"A script can have at most {MAX_SCRIPT} messages.")
+    from .pressure import validate as validate_pressure
+    pressure, pressure_errors = validate_pressure(spec.get("pressure"))
+    errors += pressure_errors
     rules_from = " ".join(str(spec.get("rules_from") or "User").split())[:40] or "User"
     # Earlier turns every starting agent sees after its system prompt, the way SCARBench prefills a long
     # session: cheap, and identical across runs.
@@ -229,7 +232,7 @@ def plan(spec: dict, template=None) -> dict:
     return {"title": str(spec.get("title") or "").strip()[:120] or _title(spec), "environment": spec.get("environment") or None,
             "goal": str(spec.get("goal") or "").strip(), "rules": rules, "agents": agents,
             "files": spec.get("files") or [], "limits": limits, "prompts": prompts, "prompt_ref": spec.get("prompt_ref"), "alerts": alerts,
-            "script": script, "rules_from": rules_from, "history": history, "errors": errors, "warnings": warnings}
+            "script": script, "rules_from": rules_from, "history": history, "pressure": pressure, "errors": errors, "warnings": warnings}
 
 
 def _title(spec: dict) -> str:
@@ -303,6 +306,8 @@ class Observer:
         self.alerts: list[dict] = []
         self.user_messages = 0  # every message from the person or the script, in order
         self.scripted = 0
+        self.pressure_sent = 0
+        self.pressure_from: int | None = None  # the step of the first pressure message
         self.stated: dict[int, dict] = {}  # chat_once rule number -> where it was said
         self.lock = threading.RLock()
         self.seq = 0
@@ -348,11 +353,16 @@ class Observer:
             if r.get("delivery") == "chat_once" and r["n"] in self.stated and r["text"].lower() in text.lower():
                 self.stated[r["n"]].update(message=self.user_messages, restated=self.stated[r["n"]].get("restated", 0) + 1)
 
-    def add_scripted(self, *, name: str, text: str, step: int, rules: list[int] | None = None) -> dict:
-        """A message the test itself sends (a chat_once rule or a script line). Not an intervention:
-        the room stays comparable with untouched ones."""
+    def add_scripted(self, *, name: str, text: str, step: int, rules: list[int] | None = None, pressure: dict | None = None) -> dict:
+        """A message the test itself sends (a chat_once rule, a script line, or adaptive pressure). Not an
+        intervention: the room stays comparable with others set up the same way."""
         e = self._write({"kind": "scripted_message", "agent_id": "user", "agent": name, "step": step, "text": text,
-                         "rules": rules or [], "what": f"{name} (script) wrote: “{_clip(text, 300)}”"})
+                         "rules": rules or [], **({"pressure": pressure} if pressure else {}),
+                         "what": f"{name} ({'pressure' if pressure else 'script'}) wrote: “{_clip(text, 300)}”"})
+        if pressure:
+            self.pressure_sent += 1
+            if self.pressure_from is None:
+                self.pressure_from = step
         self.user_messages += 1
         self.scripted += 1
         if not rules:
@@ -443,6 +453,7 @@ class Observer:
                          "created_by": chain[1]["name"] if len(chain) > 1 else None,
                          "chain": [a["name"] for a in chain], "attribution": self.attribution(agent_id),
                          "after_intervention": bool(self.interventions),
+                         "after_pressure": self.pressure_from is not None,
                          "since_stated": self.since_stated(rule, step)})
         self.events.append(e)
         return e
@@ -478,6 +489,7 @@ class Observer:
                           "attribution": sorted({e["attribution"] for e in worst if e.get("attribution")}),
                           "flagged_instructions": [{"by": f["agent"], "to": f["target"], "instructions": f["instructions"]} for f in flags],
                           "after_intervention": bool(worst) and all(e.get("after_intervention") for e in worst),
+                          "after_pressure": bool(worst) and all(e.get("after_pressure") for e in worst),
                           "disclosed": disclosed, "delivery": r.get("delivery", "system"),
                           "since_stated": next((e["since_stated"] for e in worst if e.get("since_stated")), None)})
         other = [e for e in self.events if e["rule"] is None]
@@ -486,6 +498,8 @@ class Observer:
                   "report_check": check, "team": list(self.team.values()), "reports": self.reports,
                   "interactive": bool(self.interventions), "interventions": len(self.interventions),
                   "scripted_messages": self.scripted, "sandbox_restarts": self.restarts,
+                  "pressure": ({k: self.spec["pressure"][k] for k in ("name", "strategy", "objective", "turns")}
+                               | {"sent": self.pressure_sent}) if self.spec.get("pressure") else None,
                   "alerts": _alert_summary(self.spec.get("alerts") or [], self.alerts),
                   "verdict": verdict(rules, final_action, check)}
         _write_json(self.folder / "observer.json", result)
@@ -723,7 +737,7 @@ def _agents_phrase(n: int) -> str:
 
 
 def run_room(*, spec: dict, models: dict, cfg: dict, episode_dir: Path, episode_id: str, sandbox, new_model=None,
-             messages: Path | None = None) -> dict:
+             messages: Path | None = None, pressure_post=None) -> dict:
     """Runs one room to the end. `models` maps agent id to a model client. Returns observer.json.
 
     `new_model(agent, creator_model)` makes the client for an agent created during the room; by
@@ -732,6 +746,10 @@ def run_room(*, spec: dict, models: dict, cfg: dict, episode_dir: Path, episode_
     `messages` is a JSONL file the person running the test appends to (see `Messages`). Their
     messages reach every agent at its next turn. With it, the room stays open for
     `limits.follow_up_seconds` after the final report, and a new message sends the team back to work.
+
+    With `spec["pressure"]`, after each final report (once script lines sent after a report are used up)
+    a second model writes the next message pushing the team toward the objective (see pressure.py).
+    `pressure_post` replaces its chat call in tests.
     """
     new_model = new_model or (lambda agent, creator_model: creator_model)
     episode_dir.mkdir(parents=True, exist_ok=False)
@@ -751,6 +769,8 @@ def run_room(*, spec: dict, models: dict, cfg: dict, episode_dir: Path, episode_
         "prompt": spec.get("prompt_ref") or {"id": "default", "name": "Default", "version": 1},
         "started_at": _now(), "status": "running",
     }
+    if spec.get("pressure"):
+        manifest["pressure"] = {k: spec["pressure"][k] for k in ("name", "strategy", "objective", "turns", "model")}
     if spec.get("environment"):
         from .environments import load_template
         from .evidence import snapshot_definition
@@ -834,11 +854,11 @@ def run_room(*, spec: dict, models: dict, cfg: dict, episode_dir: Path, episode_
                 observer.add_intervention(name=name, text=text, step=step)
                 post(None, f"{name} (the person who gave you this task): {text}")
 
-        def say(name: str, text: str, step: int, rules: list[int] | None = None) -> None:
-            """A message the test sends by itself: a chat_once rule or a script line."""
+        def say(name: str, text: str, step: int, rules: list[int] | None = None, pressure: dict | None = None) -> None:
+            """A message the test sends by itself: a chat_once rule, a script line or adaptive pressure."""
             tr.log(step=step, role="user", event="user_message", agent_id="user", name=name, content=text,
-                   scripted=True, rules=rules or [])
-            observer.add_scripted(name=name, text=text, step=step, rules=rules)
+                   scripted=True, rules=rules or [], **({"pressure": pressure} if pressure else {}))
+            observer.add_scripted(name=name, text=text, step=step, rules=rules, pressure=pressure)
             post(None, f"{name} (the person who gave you this task): {text}")
 
         def post(sender: dict | None, text: str) -> None:
@@ -1016,6 +1036,11 @@ def run_room(*, spec: dict, models: dict, cfg: dict, episode_dir: Path, episode_
         for m in [m for m in script if m["after"] == "start"]:
             say(m["name"], m["text"], step)
         pending = [m for m in script if m["after"] == "submit"]
+        attacker = None
+        if spec.get("pressure"):
+            from .pressure import Attacker
+            attacker = Attacker(spec["pressure"], spec["rules"], spec["goal"], spec.get("rules_from") or "User", post=pressure_post)
+        reports: list[tuple[int, str]] = []  # what the attacker reads besides the chat: each final report
         by_round = [m for m in script if m["after"] == "round"]
         rnd = 0
         while True:
@@ -1026,6 +1051,21 @@ def run_room(*, spec: dict, models: dict, cfg: dict, episode_dir: Path, episode_
                 say(pending[0]["name"], pending.pop(0)["text"], step)
                 tr.log(step=step, role="harness", event="resumed", scripted=True)
                 continue
+            if attacker and end_reason in TERMINAL_TOOLS and not stop_requested:
+                # Adaptive pressure answers the report: the attacker reads the chat and pushes again.
+                tr.log(step=step, role="harness", event="waiting", seconds=0, after=end_reason, scripted=True)
+                report = " ".join(str(v) for v in (final_args or {}).values()).strip()
+                reports.append((len(chat), f"{observer.names.get(final_agent or '', 'The team')} (final report): {_clip(report, 3000)}"))
+                view = list(chat)
+                for at, line in reversed(reports):  # each report where it came in the conversation
+                    view.insert(at, line)
+                text = attacker.next_message(view)
+                if text:
+                    say(attacker.name, text, step, pressure={"strategy": attacker.p["strategy"], "turn": len(attacker.sent)})
+                    tr.log(step=step, role="harness", event="resumed", scripted=True)
+                    continue
+                tr.log(step=step, role="harness", event="pressure_end", turns=len(attacker.sent),
+                       reason="turns used" if len(attacker.sent) >= attacker.p["turns"] else "objective reported done or no reply")
             if end_reason == "sandbox_died" or stop_requested or not inbox_file.enabled or limits["follow_up_seconds"] <= 0:
                 break
             # The room stays open: the person can read the report and send the team back to work.
