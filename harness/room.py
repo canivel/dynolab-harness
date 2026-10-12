@@ -80,6 +80,18 @@ _params["properties"] = {"name": {"type": "string", "description": "A short, uni
                          **{k: v for k, v in _params["properties"].items() if k != "agent_name"}}
 _params["required"] = list(_params["properties"])
 ROOM_TOOLS = [*TOOLS[:3], CREATE_AGENT, *TOOLS[3:]]
+# submit without its "What you did" field, which itself prompts a self-review (spec "submit_summary": false).
+_SUBMIT_ANSWER_ONLY = _fn("submit", "Finish the task and report the result.", answer="The final result.")
+
+
+def room_tools(spec: dict) -> list[dict]:
+    if spec.get("submit_summary", True):
+        return ROOM_TOOLS
+    return [_SUBMIT_ANSWER_ONLY if t["function"]["name"] == "submit" else t for t in ROOM_TOOLS]
+
+
+class _Raw(str):
+    """A script line delivered as the agent's whole user turn, exactly as written (script "raw": true)."""
 
 
 def _agent_id(i: int) -> str:
@@ -208,8 +220,11 @@ def plan(spec: dict, template=None) -> dict:
         if after not in ("start", "submit", "round") or (after == "round" and not 1 <= rnd <= 500):
             errors.append(f"Script message {i}: after must be start, submit or round:N (1-500).")
             continue
+        if m.get("raw", False) not in (True, False):
+            errors.append(f"Script message {i}: raw must be true or false.")
+            continue
         script.append({"n": i, "after": after, "name": " ".join(str(m.get("name") or "User").split())[:40] or "User",
-                       "text": text, **({"round": rnd} if rnd else {})})
+                       "text": text, **({"round": rnd} if rnd else {}), **({"raw": True} if m.get("raw") else {})})
     if len(script) > MAX_SCRIPT:
         errors.append(f"A script can have at most {MAX_SCRIPT} messages.")
     rules_from = " ".join(str(spec.get("rules_from") or "User").split())[:40] or "User"
@@ -220,16 +235,72 @@ def plan(spec: dict, template=None) -> dict:
     if not isinstance(raw_history, list) or len(raw_history) > MAX_HISTORY:
         errors.append(f"history must be a list of at most {MAX_HISTORY} messages.")
         raw_history = []
+    # An assistant turn may carry tool calls, each answered by a {"role": "tool"} result right after it,
+    # passed to the model as native messages (an agentic session prefilled with a mistake, say).
+    tool_names = {t["function"]["name"] for t in ROOM_TOOLS}
+    call_ids, open_calls = set(), []
     for i, h in enumerate(raw_history, 1):
-        if not isinstance(h, dict) or h.get("role") not in ("user", "assistant") or not isinstance(h.get("content"), str) \
-                or not h["content"].strip() or len(h["content"]) > 8000:
-            errors.append(f"History message {i}: role user or assistant, and 1-8,000 characters of content.")
+        role = h.get("role") if isinstance(h, dict) else None
+        content = h.get("content") if isinstance(h, dict) else None
+        content = "" if content is None else content
+        if role not in ("user", "assistant", "tool") or not isinstance(content, str) or len(content) > 8000:
+            errors.append(f"History message {i}: role user, assistant or tool, and at most 8,000 characters of content.")
             continue
-        history.append({"role": h["role"], "content": h["content"]})
+        if role == "tool":
+            if h.get("tool_call_id") not in open_calls:
+                errors.append(f"History message {i}: a tool result needs the tool_call_id of a call in the assistant turn "
+                              "just before it that has no result yet.")
+                continue
+            open_calls.remove(h["tool_call_id"])
+            history.append({"role": "tool", "tool_call_id": h["tool_call_id"], "content": content})
+            continue
+        if open_calls:
+            errors.append(f"History message {i}: the tool calls before it ({', '.join(open_calls)}) need their results first.")
+            open_calls = []
+        calls = _history_calls(h.get("tool_calls"), i, call_ids, tool_names, errors, warnings) if role == "assistant" else []
+        if calls is None:
+            continue
+        if not content.strip() and not calls:
+            errors.append(f"History message {i}: write 1-8,000 characters of content (an assistant turn may instead have only tool calls).")
+            continue
+        history.append({"role": role, "content": content, **({"tool_calls": calls} if calls else {})})
+        open_calls = [c["id"] for c in calls]
+    if open_calls:
+        errors.append(f"History: the last tool calls ({', '.join(open_calls)}) need their results.")
+    if spec.get("submit_summary", True) not in (True, False):
+        errors.append("submit_summary must be true or false.")
     return {"title": str(spec.get("title") or "").strip()[:120] or _title(spec), "environment": spec.get("environment") or None,
             "goal": str(spec.get("goal") or "").strip(), "rules": rules, "agents": agents,
             "files": spec.get("files") or [], "limits": limits, "prompts": prompts, "prompt_ref": spec.get("prompt_ref"), "alerts": alerts,
-            "script": script, "rules_from": rules_from, "history": history, "errors": errors, "warnings": warnings}
+            "script": script, "rules_from": rules_from, "history": history, "submit_summary": spec.get("submit_summary", True) is not False,
+            "errors": errors, "warnings": warnings}
+
+
+def _history_calls(raw, i: int, seen: set, tool_names: set, errors: list, warnings: list) -> list[dict] | None:
+    """An assistant turn's tool calls in the OpenAI shape, arguments as a JSON string. None when one is unusable."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or len(raw) > 20:
+        errors.append(f"History message {i}: tool_calls must be a list of at most 20 calls.")
+        return None
+    calls = []
+    for j, c in enumerate(raw, 1):
+        fn = (c.get("function") or c) if isinstance(c, dict) else {}  # {"function": {name, arguments}} or {name, arguments}
+        cid, name, args = c.get("id") if isinstance(c, dict) else None, fn.get("name"), fn.get("arguments", {})
+        if isinstance(args, str):
+            try:
+                args = json.loads(args or "{}")
+            except json.JSONDecodeError:
+                args = None
+        if not isinstance(cid, str) or not cid.strip() or cid in seen or not isinstance(name, str) or not name.strip() \
+                or not isinstance(args, dict):
+            errors.append(f"History message {i}, tool call {j}: give a unique id, function.name and JSON object arguments.")
+            return None
+        seen.add(cid)
+        if name not in tool_names:
+            warnings.append(f"History message {i} calls {name}, a tool agents in the room don't have.")
+        calls.append({"id": cid, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}})
+    return calls
 
 
 def _title(spec: dict) -> str:
@@ -787,6 +858,7 @@ def run_room(*, spec: dict, models: dict, cfg: dict, episode_dir: Path, episode_
                system_prompt=prompts[spec["agents"][0]["id"]], model_id=manifest["model_id"], seed=None)
 
         history = {a["id"]: [{"role": "system", "content": prompts[a["id"]]}, *spec.get("history", [])] for a in team}
+        tools = room_tools(spec)
         started: set[str] = set()  # agents that have had their first turn
         inbox: dict[str, list[str]] = {a["id"]: [] for a in team}
         chat: list[str] = []  # everything said in the room, for agents who join later
@@ -834,19 +906,20 @@ def run_room(*, spec: dict, models: dict, cfg: dict, episode_dir: Path, episode_
                 observer.add_intervention(name=name, text=text, step=step)
                 post(None, f"{name} (the person who gave you this task): {text}")
 
-        def say(name: str, text: str, step: int, rules: list[int] | None = None) -> None:
-            """A message the test sends by itself: a chat_once rule or a script line."""
+        def say(name: str, text: str, step: int, rules: list[int] | None = None, raw: bool = False) -> None:
+            """A message the test sends by itself: a chat_once rule or a script line. A raw one reaches each
+            agent as its own user turn, exactly as written."""
             tr.log(step=step, role="user", event="user_message", agent_id="user", name=name, content=text,
-                   scripted=True, rules=rules or [])
+                   scripted=True, rules=rules or [], **({"raw": True} if raw else {}))
             observer.add_scripted(name=name, text=text, step=step, rules=rules)
-            post(None, f"{name} (the person who gave you this task): {text}")
+            post(None, f"{name} (the person who gave you this task): {text}", raw=text if raw else None)
 
-        def post(sender: dict | None, text: str) -> None:
+        def post(sender: dict | None, text: str, raw: str | None = None) -> None:
             line = f"{sender['name']}: {text.strip()}" if sender else text
-            chat.append(line)
+            chat.append(line)  # agents who join later read it in the room's usual form
             for a in team:
                 if sender is None or a["id"] != sender["id"]:
-                    inbox[a["id"]].append(line)
+                    inbox[a["id"]].append(_Raw(raw) if raw is not None else line)
 
         def create_agent(creator: dict, args: dict, step: int, rnd: int) -> str:
             name = " ".join(str(args.get("name") or "").split())[:40]
@@ -904,26 +977,34 @@ def run_room(*, spec: dict, models: dict, cfg: dict, episode_dir: Path, episode_
             """One agent's turn. True when it ended the session with submit or report_blocked."""
             nonlocal step, final_action, final_args, final_agent
             aid = agent["id"]
-            if aid not in started:
-                started.add(aid)
+            raw = [str(m) for m in inbox[aid] if isinstance(m, _Raw)]
+            said = [m for m in inbox[aid] if not isinstance(m, _Raw)]
+            first = aid not in started
+            started.add(aid)
+            update = None
+            # A raw message is the turn itself: the goal is already in the system prompt, so the first turn of a
+            # starting agent drops the "Team goal" wrapper. A created agent still gets its creator's instructions.
+            if first and (not raw or agent.get("created_by")):
                 update = f"Team goal:\n{spec['goal']}"
                 if agent.get("created_by"):
                     creator = next(a["name"] for a in team if a["id"] == agent["created_by"])
                     update += f"\n\n{creator} added you to the team with these instructions:\n{agent['instructions']}"
-                if inbox[aid]:
-                    update += "\n\nMessages in the room so far:\n" + "\n".join(inbox[aid])
-            elif inbox[aid]:
-                update = "Messages in the room since your last turn:\n" + "\n".join(inbox[aid])
-            else:
+                if said:
+                    update += "\n\nMessages in the room so far:\n" + "\n".join(said)
+            elif said:
+                update = ("Messages in the room so far:\n" if first else "Messages in the room since your last turn:\n") + "\n".join(said)
+            elif not raw:
                 update = "No new messages. Continue your part of the work."
             inbox[aid] = []
-            tr.log(step=step + 1, role="user", event="room_update", agent_id=aid, content=update, round=rnd)
-            history[aid].append({"role": "user", "content": update})
+            turns = ([update] if update else []) + raw
+            tr.log(step=step + 1, role="user", event="room_update", agent_id=aid, content="\n\n".join(turns), round=rnd,
+                   **({"messages": turns, "raw": len(raw)} if raw else {}))
+            history[aid] += [{"role": "user", "content": t} for t in turns]
             # The agent may run commands and read their output. The turn ends when it replies
             # without a tool call (its message to the team) or runs out of steps.
             for _ in range(limits["steps_per_turn"]):
                 step += 1
-                msg = models[aid].complete(history[aid], ROOM_TOOLS, None)
+                msg = models[aid].complete(history[aid], tools, None)
                 calls = msg.get("tool_calls") or []
                 text = (msg.get("content") or "").strip()
                 tr.log(step=step, role="assistant", event="model", agent_id=aid, content=msg.get("content"),
@@ -988,7 +1069,7 @@ def run_room(*, spec: dict, models: dict, cfg: dict, episode_dir: Path, episode_
                 for r in [r for r in once if r.get("at") == rnd]:  # a rule said once, later in the session
                     say(spec.get("rules_from") or "User", f"From now on, to everything I ask you: {r['text']}", step, rules=[r["n"]])
                 for m in [m for m in by_round if m["round"] == rnd]:
-                    say(m["name"], m["text"], step)
+                    say(m["name"], m["text"], step, raw=m.get("raw", False))
                 turn = 0
                 while turn < len(team):  # an agent created this round takes its turn this round
                     agent = team[turn]
@@ -1014,7 +1095,7 @@ def run_room(*, spec: dict, models: dict, cfg: dict, episode_dir: Path, episode_
                 + "\n".join(f"{r['n']}. {r['text']}" for r in first), step, rules=[r["n"] for r in first])
         script = list(spec.get("script") or [])
         for m in [m for m in script if m["after"] == "start"]:
-            say(m["name"], m["text"], step)
+            say(m["name"], m["text"], step, raw=m.get("raw", False))
         pending = [m for m in script if m["after"] == "submit"]
         by_round = [m for m in script if m["after"] == "round"]
         rnd = 0
@@ -1023,7 +1104,8 @@ def run_room(*, spec: dict, models: dict, cfg: dict, episode_dir: Path, episode_
             if pending and end_reason in TERMINAL_TOOLS and not stop_requested:  # only after a final report
                 # The script answers the final report itself and sends the team back to work.
                 tr.log(step=step, role="harness", event="waiting", seconds=0, after=end_reason, scripted=True)
-                say(pending[0]["name"], pending.pop(0)["text"], step)
+                m = pending.pop(0)
+                say(m["name"], m["text"], step, raw=m.get("raw", False))
                 tr.log(step=step, role="harness", event="resumed", scripted=True)
                 continue
             if end_reason == "sandbox_died" or stop_requested or not inbox_file.enabled or limits["follow_up_seconds"] <= 0:
