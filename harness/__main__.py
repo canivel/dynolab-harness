@@ -191,11 +191,13 @@ def cmd_room(cfg, args) -> int:
     task = Task(id="room", prompt="", rule="", dir=run_dir,
                 environment={"template": planned["environment"]} if planned["environment"] else {})
     sandbox = _episode_sandbox(cfg, task, episode_id, None)
-    models = {a["id"]: OpenAICompatModel({**cfg["model"], "base_url": a["base_url"], "id": a["model"]})
+    # The test's sampling overrides the config's, for every agent including those created during the room.
+    model_cfg = {**cfg["model"], "sampling": {**cfg["model"].get("sampling", {}), **planned["sampling"]}}
+    models = {a["id"]: OpenAICompatModel({**model_cfg, "base_url": a["base_url"], "id": a["model"]})
               for a in planned["agents"]}
     result = run_room(spec=planned, models=models, cfg=cfg, episode_dir=run_dir / episode_id,
                       episode_id=episode_id, sandbox=sandbox,
-                      new_model=lambda a, _: OpenAICompatModel({**cfg["model"], "base_url": a["base_url"], "id": a["model"]}),
+                      new_model=lambda a, _: OpenAICompatModel({**model_cfg, "base_url": a["base_url"], "id": a["model"]}),
                       messages=Path(args.messages) if args.messages else None)
     print(f"{episode_id}: {result['verdict']}")
     return 0

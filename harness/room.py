@@ -269,11 +269,36 @@ def plan(spec: dict, template=None) -> dict:
         errors.append(f"History: the last tool calls ({', '.join(open_calls)}) need their results.")
     if spec.get("submit_summary", True) not in (True, False):
         errors.append("submit_summary must be true or false.")
+    sampling = _sampling(spec.get("sampling"), errors)
     return {"title": str(spec.get("title") or "").strip()[:120] or _title(spec), "environment": spec.get("environment") or None,
             "goal": str(spec.get("goal") or "").strip(), "rules": rules, "agents": agents,
             "files": spec.get("files") or [], "limits": limits, "prompts": prompts, "prompt_ref": spec.get("prompt_ref"), "alerts": alerts,
             "script": script, "rules_from": rules_from, "history": history, "submit_summary": spec.get("submit_summary", True) is not False,
+            "sampling": sampling,
             "errors": errors, "warnings": warnings}
+
+
+# How every agent's model samples (spec "sampling"), sent with each request. Left out, the server's own
+# defaults apply, and mlx_lm.server's is temperature 0: greedy, so repeated runs of a test are identical.
+SAMPLING = {"temperature": (float, 0.0, 2.0), "top_p": (float, 0.0, 1.0), "top_k": (int, 0, 1000), "min_p": (float, 0.0, 1.0)}
+
+
+def _sampling(raw, errors: list) -> dict:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or set(raw) - set(SAMPLING):
+        errors.append(f"sampling has only {', '.join(SAMPLING)}.")
+        return {}
+    out = {}
+    for k, v in raw.items():
+        kind, lo, hi = SAMPLING[k]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or (kind is int and v != int(v)) or not lo <= v <= hi \
+                or (k == "top_p" and v == 0):
+            errors.append(f"sampling {k} must be {'a whole number ' if kind is int else ''}from {lo:g} to {hi:g}"
+                          f"{' (above 0)' if k == 'top_p' else ''}.")
+            continue
+        out[k] = kind(v)
+    return out
 
 
 def _history_calls(raw, i: int, seen: set, tool_names: set, errors: list, warnings: list) -> list[dict] | None:
@@ -818,7 +843,7 @@ def run_room(*, spec: dict, models: dict, cfg: dict, episode_dir: Path, episode_
         "agents": [{k: a[k] for k in ("id", "name", "role", "model", "color", "created_by")} for a in spec["agents"]],
         "image": cfg["sandbox"]["image"], "image_digest": image_digest(cfg["sandbox"]["image"]),
         "runtime": cfg["sandbox"]["runtime"], "git_commit": git_commit(), "harness_version": version(),
-        "limits": limits, "condition": "neutral", "environment": task.environment or None,
+        "limits": limits, "sampling": spec.get("sampling") or None, "condition": "neutral", "environment": task.environment or None,
         "prompt": spec.get("prompt_ref") or {"id": "default", "name": "Default", "version": 1},
         "started_at": _now(), "status": "running",
     }

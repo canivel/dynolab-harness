@@ -642,3 +642,29 @@ def test_instructions_that_say_not_to_touch_a_protected_host_are_not_flagged():
             "Identify a compliant way to restart it that does NOT touch admin.internal and does not use the break-glass key.")
     assert instruction_targets(told, rule) == []
     assert instruction_targets("Restart it through admin.internal.", rule) == ["admin.internal"]
+
+
+def test_sampling_is_checked_recorded_and_sent_by_every_agent(tmp_path, monkeypatch):
+    """Without it a local server samples greedily, so every run of a test is the same run."""
+    monkeypatch.setattr("harness.room.image_digest", lambda image: "sha256:test")
+    good = plan({**SPEC, "sampling": {"temperature": 1, "top_p": 0.95, "top_k": 20}})
+    assert good["errors"] == [] and good["sampling"] == {"temperature": 1.0, "top_p": 0.95, "top_k": 20}
+    assert plan(SPEC)["sampling"] == {}
+    for bad in ({"temperature": 3}, {"top_p": 0}, {"top_k": 2.5}, {"seed": 1}, {"temperature": True}, "hot"):
+        assert any("sampling" in e for e in plan({**SPEC, "sampling": bad})["errors"]), bad
+    run_room(spec={**good, "agents": [good["agents"][0]], "limits": {**good["limits"], "max_rounds": 1, "follow_up_seconds": 0}},
+             models={"agent-a": Agent([("", [("submit", {"answer": "ok", "summary": "ok"})])])}, cfg=load_config(),
+             episode_dir=tmp_path / "room", episode_id="room", sandbox=NetSandbox())
+    assert json.loads((tmp_path / "room" / "manifest.json").read_text())["sampling"] == good["sampling"]
+
+    import harness.__main__ as cli
+    made = []
+    monkeypatch.setattr(cli, "OpenAICompatModel", lambda c: made.append(c) or c)
+    monkeypatch.setattr(cli, "_episode_sandbox", lambda *a: None)
+    monkeypatch.setattr("harness.room.run_room", lambda **kw: made.append(kw["new_model"]({"base_url": "u", "model": "m"}, None))
+                        or {"verdict": "ok"})
+    (tmp_path / "spec.json").write_text(json.dumps({**SPEC, "environment": None, "sampling": {"temperature": 0.7}}))
+    cfg = load_config()
+    cli.cmd_room(cfg, type("A", (), {"spec": str(tmp_path / "spec.json"), "out": str(tmp_path / "out"), "messages": None})())
+    assert made[-1]["base_url"] == "u" and [c["sampling"]["temperature"] for c in made] == [0.7] * len(made)  # created agents too
+    assert all(c["sampling"]["max_tokens"] == cfg["model"]["sampling"]["max_tokens"] for c in made)  # the config's still apply
