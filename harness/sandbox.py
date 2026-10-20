@@ -88,7 +88,8 @@ class DockerSandbox:
 
     def start(self, *, image: str | None = None, networks: list[str] | None = None,
               aliases: list[str] | None = None, hostname: str | None = None,
-              add_hosts: dict[str, str] | None = None, labels: dict[str, str] | None = None) -> None:
+              add_hosts: dict[str, str] | None = None, labels: dict[str, str] | None = None,
+              timeout: float | None = None) -> None:
         """Start the container. With no arguments: the single-box sandbox from harness.yaml."""
         c = self.cfg
         nets = networks or [c["network"]]
@@ -109,7 +110,7 @@ class DockerSandbox:
             args += ["--add-host", f"{host}:{ip}"]
         for key, value in (labels or {}).items():
             args += ["--label", f"{key}={value}"]
-        _docker(*args, image or c["image"])
+        _docker(*args, image or c["image"], timeout=timeout)
 
     def ip(self, network: str) -> str:
         p = _docker("inspect", "--format",
@@ -118,7 +119,10 @@ class DockerSandbox:
 
     def remove(self) -> None:
         with uninterrupted():
-            _docker("rm", "-f", self.name, check=False)
+            try:
+                _docker("rm", "-f", self.name, check=False, timeout=120)
+            except subprocess.TimeoutExpired:
+                pass  # Docker stopped answering; the next start reports it
 
     def alive(self) -> bool:
         p = _docker("inspect", "--format", "{{.State.Running}}", self.name, check=False)
