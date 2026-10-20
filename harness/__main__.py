@@ -38,7 +38,12 @@ def cmd_check(cfg, args) -> int:
     # In JSON mode each result also goes to stderr as it finishes, so viewers can show progress.
     progress = (lambda n, p, d: print(json.dumps(_check_entry(n, p, d)), file=sys.stderr, flush=True)) \
         if as_json else None
-    results = run_checks(cfg["sandbox"], on_result=progress)
+    try:
+        results = run_checks(cfg["sandbox"], on_result=progress)
+    except Exception as e:  # noqa: BLE001 - always report, so an app never waits on a crash
+        results = [("checks", False, f"{type(e).__name__}: {e}")]
+        if progress:
+            progress(*results[0])
     ok = bool(results) and all(passed for _, passed, _ in results)
     if as_json:
         print(json.dumps({"ok": ok, "checks": [_check_entry(n, p, d) for n, p, d in results]}))
@@ -527,54 +532,26 @@ def _step(name: str, ok: bool, detail: str = "") -> dict:
     return entry
 
 
+def cmd_doctor(cfg, args) -> int:
+    """What this machine still needs for the sandbox, and how setup would fix each. Changes nothing."""
+    from .doctor import diagnose
+    report = diagnose(cfg["sandbox"])
+    print(json.dumps(report, indent=2))
+    return 0 if report["ok"] else 1
+
+
 def cmd_setup(cfg, args) -> int:
     """Prepare this machine: sandbox runtime (optional install), image and network."""
-    import platform
-    import shutil
     from . import config as c
-    steps, sb = [], cfg["sandbox"]
-    brew = shutil.which("brew") or ("/opt/homebrew/bin/brew" if Path("/opt/homebrew/bin/brew").exists() else None)
-    if args.install_runtime:
-        if platform.system() != "Darwin" or not brew:
-            steps.append(_step("install runtime", False, "Automatic install needs macOS with Homebrew. On Linux, install Docker and gVisor (runsc): https://gvisor.dev/docs/user_guide/install/"))
-        else:
-            for name, cmd in [
-                ("install colima and docker", [brew, "install", "colima", "docker", "docker-buildx"]),
-                ("start the Linux VM", ["colima", "start", "--cpu", "4", "--memory", "8", "--disk", "60", "--vm-type", "vz"]),
-                ("install gVisor in the VM", ["colima", "ssh", "--", "bash", "-lc",
-                    "curl -fsSL https://gvisor.dev/archive.key | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg && "
-                    "echo \"deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main\" | sudo tee /etc/apt/sources.list.d/gvisor.list >/dev/null && "
-                    "sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq runsc && sudo runsc install && sudo systemctl restart docker"])]:
-                r = subprocess.run(cmd, capture_output=True, text=True)
-                steps.append(_step(name, r.returncode == 0, (r.stderr or r.stdout)[-300:].strip()))
-                if r.returncode:
-                    break
-            colima_cfg = Path("~/.colima/default/colima.yaml").expanduser()
-            if colima_cfg.exists() and "runsc" not in colima_cfg.read_text():
-                text = colima_cfg.read_text().replace("docker: {}", "docker:\n  runtimes:\n    runsc:\n      path: /usr/bin/runsc")
-                colima_cfg.write_text(text)
-                steps.append(_step("keep gVisor across VM restarts", "runsc" in text, str(colima_cfg)))
+    from .doctor import setup
+    steps = []
     try:
-        info = subprocess.run(["docker", "info", "--format", "{{json .Runtimes}}"], capture_output=True, text=True, timeout=30)
-        docker_ok = info.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        docker_ok, info = False, None
-    steps.append(_step("docker reachable", docker_ok, "" if docker_ok else "Install a Docker runtime, or run setup --install-runtime on macOS"))
-    if docker_ok:
-        steps.append(_step("gVisor runtime available", sb["runtime"] in info.stdout, info.stdout.strip()[:200]))
-        have = subprocess.run(["docker", "image", "inspect", sb["image"]], capture_output=True).returncode == 0
-        if not have:
-            r = subprocess.run(["docker", "build", "-t", sb["image"], "-f", str(c.DOCKERFILE), str(c.BUILTIN)], capture_output=True, text=True)
-            have = r.returncode == 0
-        steps.append(_step("sandbox image", have, sb["image"]))
-        net = subprocess.run(["docker", "network", "inspect", sb["network"]], capture_output=True).returncode == 0
-        if not net:
-            net = subprocess.run(["docker", "network", "create", "--internal", "--subnet", "10.77.0.0/24", sb["network"]],
-                                 capture_output=True).returncode == 0
-        steps.append(_step("internal network", net, sb["network"]))
+        ok = setup(cfg["sandbox"], lambda n, p, d: steps.append(_step(n, p, d)), install=args.install_runtime)
+    except Exception as e:  # noqa: BLE001 - always report, so an app never waits on a crash
+        steps.append(_step("setup", False, f"{type(e).__name__}: {e}"))
+        ok = False
     for d in (c.HOME / "tasks", c.HOME / "environments", c.HOME / "mocks", c.RUNS_DIR, c.KEYS_DIR):
         d.mkdir(parents=True, exist_ok=True)
-    ok = all(s["passed"] for s in steps)
     print(json.dumps({"ok": ok, "steps": steps, "home": str(c.HOME)}, indent=2))
     return 0 if ok else 1
 
@@ -669,6 +646,7 @@ def main(argv=None) -> int:
     p.add_argument("--title")
     p.add_argument("--question")
     p.add_argument("--definitions", help="folder holding the task definitions that ran, for runs made before episodes saved their own")
+    sub.add_parser("doctor", help="what the sandbox still needs on this machine (changes nothing)")
     sub.add_parser("setup", help="prepare the sandbox runtime, image and network").add_argument(
         "--install-runtime", action="store_true", help="macOS: install Colima, Docker and gVisor with Homebrew")
     p = sub.add_parser("env", help="environment templates and instances")

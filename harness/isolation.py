@@ -4,6 +4,7 @@ from __future__ import annotations
 import subprocess
 from typing import Callable
 
+from .doctor import run, tail
 from .sandbox import DockerSandbox
 
 PROBE = "/opt/isolation-probe"
@@ -24,6 +25,7 @@ DESCRIPTIONS = {
 }
 
 Report = Callable[[str, bool, str], None]
+START_TIMEOUT_S = 120
 
 
 def run_checks(sandbox_cfg: dict, on_result: Report | None = None) -> list[tuple[str, bool, str]]:
@@ -45,21 +47,29 @@ def run_checks(sandbox_cfg: dict, on_result: Report | None = None) -> list[tuple
            "ok" if info.returncode == 0 else (info.stderr.strip()[:200] or "docker not found"))
     if info.returncode != 0:
         return results
-    image = subprocess.run(["docker", "image", "inspect", sandbox_cfg["image"]],
-                           capture_output=True, text=True)
-    record("sandbox image built", image.returncode == 0,
-           sandbox_cfg["image"] if image.returncode == 0 else "run `make image`")
-    if image.returncode != 0:
+    code, _, err = run(["docker", "image", "inspect", sandbox_cfg["image"]], timeout=30)
+    record("sandbox image built", code == 0,
+           sandbox_cfg["image"] if code == 0 else f"{sandbox_cfg['image']} isn't built. Run setup (in Dyno: Set up).")
+    if code != 0:
         return results
-    net = subprocess.run(["docker", "network", "inspect", "--format", "{{.Internal}}",
-                          sandbox_cfg["network"]], capture_output=True, text=True)
-    record("network is --internal", net.stdout.strip() == "true",
-           net.stdout.strip() or net.stderr.strip())
+    code, out, err = run(["docker", "network", "inspect", "--format", "{{.Internal}}", sandbox_cfg["network"]], timeout=30)
+    record("network is --internal", out.strip() == "true",
+           out.strip() or tail(err) or f"{sandbox_cfg['network']} doesn't exist. Run setup (in Dyno: Set up).")
 
     sb = DockerSandbox(sandbox_cfg, "ep-isolation-check")
     sb.remove()
     try:
-        sb.start()
+        try:
+            sb.start(timeout=START_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            record("runtime is runsc", False, f"The test container didn't start within {START_TIMEOUT_S} s. "
+                   "Restart Docker (colima restart), then run the checks again.")
+            return results
+        except subprocess.CalledProcessError as e:
+            msg = tail((e.stderr or b"").decode(errors="replace") if isinstance(e.stderr, bytes) else str(e.stderr or e))
+            hint = " gVisor isn't installed in Docker: run setup to install it." if "runtime" in msg.lower() else ""
+            record("runtime is runsc", False, f"The test container didn't start: {msg}{hint}")
+            return results
         rt = sb.runtime()
         record("runtime is runsc", rt == "runsc", rt)
 
